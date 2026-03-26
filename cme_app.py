@@ -444,15 +444,29 @@ def write_combined_excel(ex_records, nx_records) -> bytes:
 #  SECTION 4 — ANALYZER: load combined Excel
 # ══════════════════════════════════════════════════════════════════════════════
 
-def load_combined(file_bytes) -> pd.DataFrame:
-    df = pd.read_excel(io.BytesIO(file_bytes), sheet_name='Combined Data', header=0)
-    return df
+def load_combined(file_bytes):
+    """Load combined Excel. Returns (df, section_lookup dict col_header->section)."""
+    buf = io.BytesIO(file_bytes)
+    df = pd.read_excel(buf, sheet_name='Combined Data', header=0)
+    # Build section lookup from Column Map sheet
+    section_lookup = {}
+    try:
+        buf.seek(0)
+        df_map = pd.read_excel(buf, sheet_name='Column Map', header=0)
+        for _, row in df_map.iterrows():
+            hdr = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ''
+            sec = str(row.iloc[1]).strip() if pd.notna(row.iloc[1]) else ''
+            if hdr and sec:
+                section_lookup[hdr] = sec
+    except Exception:
+        pass
+    return df, section_lookup
 
 
-def classify_cols(df: pd.DataFrame):
+def classify_cols(df: pd.DataFrame, section_lookup: dict = None):
     """
-    Classify columns into sections.
-    MCQ FIX: columns deduplicated by write_combined_excel() carry __PRE/__POST/__EVAL suffix.
+    Classify columns into sections using Column Map lookup when available,
+    falling back to prefix/suffix heuristics.
     """
     pre_cols  = []
     post_cols = []
@@ -461,22 +475,30 @@ def classify_cols(df: pd.DataFrame):
 
     for col in df.columns:
         cu = col.upper()
+
+        # 1. Dedup suffix (MCQ fix)
         if cu.endswith('__PRE'):
             pre_cols.append(col); continue
         if cu.endswith('__POST'):
             post_cols.append(col); continue
         if cu.endswith('__EVAL'):
             eval_cols.append(col); continue
-        if cu.startswith('PRE_'):
-            pre_cols.append(col)
-        elif cu.startswith('POST_'):
-            post_cols.append(col)
-        elif cu.startswith('EVAL_'):
-            eval_cols.append(col)
-        elif cu.startswith('FOLLOWUP_'):
-            eval_cols.append(col)
-        else:
-            meta_cols.append(col)
+
+        # 2. Column Map lookup (most reliable)
+        if section_lookup:
+            sec = section_lookup.get(col, '')
+            if sec == 'pre':      pre_cols.append(col);  continue
+            if sec == 'post':     post_cols.append(col); continue
+            if sec == 'eval':     eval_cols.append(col); continue
+            if sec == 'followup': eval_cols.append(col); continue
+            if sec == 'meta':     meta_cols.append(col); continue
+
+        # 3. Prefix heuristic fallback
+        if cu.startswith('PRE_'):      pre_cols.append(col)
+        elif cu.startswith('POST_'):   post_cols.append(col)
+        elif cu.startswith('EVAL_'):   eval_cols.append(col)
+        elif cu.startswith('FOLLOWUP_'): eval_cols.append(col)
+        else:                          meta_cols.append(col)
 
     return pre_cols, post_cols, eval_cols, meta_cols
 
@@ -775,8 +797,14 @@ def compute_evaluation(df, eval_cols):
         pct, n = pct_yes(df[intent_col])
         metrics['intent'] = {'pct': pct, 'n': n, 'col': intent_col}
 
-    # Would recommend
-    rec_col = find_col(df, 'recommend')
+    # Would recommend - must be in eval_cols only, exclude MCQ question columns
+    rec_col = None
+    for col in eval_cols:
+        if 'recommend' in col.lower() and len(col) < 60:
+            rec_col = col
+            break
+    if rec_col is None:
+        rec_col = find_col(df, 'would you recommend') or find_col(df, 'recommend this program')
     if rec_col:
         pct, n = pct_yes(df[rec_col])
         metrics['recommend'] = {'pct': pct, 'n': n, 'col': rec_col}
@@ -797,41 +825,69 @@ def compute_evaluation(df, eval_cols):
         pct, n = avg_pct_new(df[new_col])
         metrics['content_new'] = {'pct': pct, 'n': n, 'col': new_col}
 
-    # Satisfaction items (faculty, objectives, etc.)
-    sat_keywords = [
-        ('faculty', ['faculty', 'knowledgeable', 'effective']),
-        ('objectives', ['objectives', 'objective']),
-        ('overall', ['overall', 'satisfaction']),
-    ]
+    # Satisfaction items — any eval col with Likert agree/disagree responses
+    SAT_INCLUDE = ['faculty', 'knowledgeable', 'content presented', 'useful tools',
+                   'teaching', 'learning methods', 'more confident', 'fair and balanced',
+                   'relevant', 'enhanced', 'objectives', 'objective']
+    SAT_EXCLUDE = ['intend', 'modify', 'recommend', 'bias', 'new to you', 'percentage',
+                   'barrier', 'plan to', 'accommodate', 'utilized', 'patient access',
+                   'please', 'comment', 'feedback', 'topic', 'credit', 'specify',
+                   'how long', 'practice type', 'specialty', 'if no', 'explain']
     satisfaction = []
-    for sat_key, kws in sat_keywords:
-        for kw_set in [kws]:
-            for col in eval_cols:
-                if all(kw in col.lower() for kw in kw_set[:1]):
-                    pct, n = pct_agree(df[col])
-                    if pct is not None:
-                        # Strip long prefixes for display
-                        label = col
-                        for pfx in ['Please indicate the extent of your agreement with the following statements:>> ',
-                                    'EVAL_', 'META_', 'PRE_', 'POST_']:
-                            label = label.replace(pfx, '')
-                        label = label[:70]
-                        satisfaction.append({'label': label, 'pct': pct, 'n': n, 'col': col})
-                        break
+    seen_sat_labels = set()
+    for col in eval_cols:
+        cl = col.lower()
+        if any(ex in cl for ex in SAT_EXCLUDE):
+            continue
+        if not any(inc in cl for inc in SAT_INCLUDE):
+            continue
+        pct, n = pct_agree(df[col])
+        if pct is not None and n > 0:
+            label = col
+            for pfx in ['Please indicate the extent of your agreement with the following statements:>> ',
+                        'EVAL_', 'META_', 'PRE_', 'POST_']:
+                label = label.replace(pfx, '')
+            label = label[:70]
+            if label not in seen_sat_labels:
+                seen_sat_labels.add(label)
+                satisfaction.append({'label': label, 'pct': pct, 'n': n, 'col': col})
 
     metrics['satisfaction'] = satisfaction
 
-    # Behavior change checkboxes
-    behavior_col = find_col(df, 'behavior', 'change') or find_col(df, 'plan to')
+    # Behavior change — look for the "plan to implement" eval column
+    behavior_col = find_col(df, 'plan to change') or find_col(df, 'plan to implement') or                    find_col(df, 'types of changes') or find_col(df, 'behavior', 'changes do you plan')
     if behavior_col:
-        counts = df[behavior_col].dropna().value_counts().head(10).to_dict()
+        from collections import Counter
+        all_vals = []
+        for v in df[behavior_col].dropna():
+            parts = str(v).split(',')
+            all_vals.extend([p.strip()[:80] for p in parts if p.strip() and p.strip() != 'nan'])
+        counts = dict(Counter(all_vals).most_common(10))
         metrics['behavior_change'] = counts
 
-    # Barriers
-    for barrier_type in ['patient', 'provider', 'system']:
-        bc = find_col(df, 'barrier', barrier_type)
+    # Barriers - find columns with "patient-level", "provider-level", "system-level"
+    barrier_patterns = {
+        'patient':  ['patient-level barrier', 'patient level barrier', 'significant patient'],
+        'provider': ['provider-level barrier', 'provider level barrier', 'significant provider'],
+        'system':   ['system-level barrier', 'system level barrier', 'significant system'],
+    }
+    for barrier_type, patterns in barrier_patterns.items():
+        bc = None
+        for pat in patterns:
+            bc = find_col(df, pat)
+            if bc:
+                break
+        if bc is None:
+            # fallback
+            bc = find_col(df, 'barrier', barrier_type)
         if bc:
-            counts = df[bc].dropna().value_counts().head(10).to_dict()
+            # Split multi-value responses and count individually
+            all_vals = []
+            for v in df[bc].dropna():
+                parts = str(v).split(',')
+                all_vals.extend([p.strip() for p in parts if p.strip()])
+            from collections import Counter
+            counts = dict(Counter(all_vals).most_common(8))
             metrics[f'barrier_{barrier_type}'] = counts
 
     # Follow-up
@@ -962,9 +1018,9 @@ def render_analyzer():
         return
 
     with st.spinner("Loading data…"):
-        df = load_combined(combo_file.read())
+        df, section_lookup = load_combined(combo_file.read())
 
-    pre_cols, post_cols, eval_cols, meta_cols = classify_cols(df)
+    pre_cols, post_cols, eval_cols, meta_cols = classify_cols(df, section_lookup)
 
     # ── Overview cards ──
     total_n   = len(df)
