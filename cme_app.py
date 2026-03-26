@@ -169,27 +169,60 @@ def parse_nexus(file_bytes):
     fu_rows  = sheet('Follow Up')
     wb.close()
 
-    # ── Email key ──
+    # ── Join key: try email first, then token/ID ──
+    def find_join_key(rows_a, rows_b):
+        """Find a key present in both row sets that can be used to join them."""
+        if not rows_a or not rows_b:
+            return None, None
+        # Try email
+        ka = _nexus_find_key(rows_a, ['email'])
+        kb = _nexus_find_key(rows_b, ['email'])
+        if ka and kb:
+            return ka, kb
+        # Try token
+        ka = _nexus_find_key(rows_a, ['token'])
+        kb = _nexus_find_key(rows_b, ['token'])
+        if ka and kb:
+            return ka, kb
+        # Try any shared key name
+        keys_a = set(rows_a[0].keys())
+        keys_b = set(rows_b[0].keys())
+        shared = keys_a & keys_b
+        for candidate in ['Email', 'email', 'Token', 'token', 'ID', 'Id', 'id']:
+            if candidate in shared:
+                return candidate, candidate
+        return None, None
+
     email_key = (_nexus_find_key(pre_rows, ['email']) or
-                 _nexus_find_key(pre_non,  ['email']))
+                 _nexus_find_key(pre_non,  ['email']) or
+                 _nexus_find_key(pre_rows, ['token']) or
+                 _nexus_find_key(pre_non,  ['token']))
 
-    # ── Build email→eval map ──
+    # ── Build email/token→eval map ──
     eval_map = {}
-    if eval_rows and email_key:
-        ek = _nexus_find_key(eval_rows, ['email'])
-        for r in eval_rows:
-            e = str(r.get(ek, '') or '').strip().lower()
-            if e:
-                eval_map[e] = r
+    if eval_rows:
+        pre_src = pre_rows or pre_non
+        join_pre, join_ev = find_join_key(pre_src, eval_rows)
+        if join_ev:
+            for r in eval_rows:
+                e = str(r.get(join_ev, '') or '').strip().lower()
+                if e:
+                    eval_map[e] = r
+        # Fallback: if no join key found, join by row position for Eval
+        if not eval_map and eval_rows:
+            for i, r in enumerate(eval_rows):
+                eval_map[f'__idx__{i}'] = r
 
-    # ── Build email→fu map ──
+    # ── Build email/token→fu map ──
     fu_map = {}
-    if fu_rows and email_key:
-        ek = _nexus_find_key(fu_rows, ['email'])
-        for r in fu_rows:
-            e = str(r.get(ek, '') or '').strip().lower()
-            if e:
-                fu_map[e] = r
+    if fu_rows:
+        pre_src = pre_rows or pre_non
+        join_pre, join_fu = find_join_key(pre_src, fu_rows)
+        if join_fu:
+            for r in fu_rows:
+                e = str(r.get(join_fu, '') or '').strip().lower()
+                if e:
+                    fu_map[e] = r
 
     # Helper to prefix keys
     def prefixed(row_dict, prefix, exclude_keys=None):
@@ -202,9 +235,13 @@ def parse_nexus(file_bytes):
 
     records = []
 
+    def get_join_val(row, key):
+        if not key: return ''
+        return str(row.get(key, '') or '').strip().lower()
+
     # ── Pre-only respondents (no post) ──
-    for pre in pre_non:
-        email = str(pre.get(email_key, '') or '').strip().lower() if email_key else ''
+    for idx, pre in enumerate(pre_non):
+        jval = get_join_val(pre, email_key)
         rec = {
             '_source':      'Nexus',
             '_has_post':    False,
@@ -212,11 +249,12 @@ def parse_nexus(file_bytes):
             '_has_followup': False,
         }
         rec.update(prefixed(pre, 'META'))
-        ev = eval_map.get(email)
+        # Try join by value, then by position fallback
+        ev = eval_map.get(jval) or eval_map.get(f'__idx__{idx}')
         if ev:
             rec.update(prefixed(ev, 'EVAL'))
             rec['_has_eval'] = True
-        fu = fu_map.get(email)
+        fu = fu_map.get(jval)
         if fu:
             rec.update(prefixed(fu, 'FOLLOWUP'))
             rec['_has_followup'] = True
@@ -224,7 +262,7 @@ def parse_nexus(file_bytes):
 
     # ── Matched pre/post respondents ──
     for i, pre in enumerate(pre_rows):
-        email = str(pre.get(email_key, '') or '').strip().lower() if email_key else ''
+        jval = get_join_val(pre, email_key)
         post  = post_rows[i] if i < len(post_rows) else {}
         rec = {
             '_source':      'Nexus',
@@ -235,11 +273,12 @@ def parse_nexus(file_bytes):
         rec.update(prefixed(pre, 'META'))
         if post:
             rec.update(prefixed(post, 'POST'))
-        ev = eval_map.get(email)
+        # Try join by value, then by position fallback (offset by pre_non length)
+        ev = eval_map.get(jval) or eval_map.get(f'__idx__{len(pre_non) + i}')
         if ev:
             rec.update(prefixed(ev, 'EVAL'))
             rec['_has_eval'] = True
-        fu = fu_map.get(email)
+        fu = fu_map.get(jval)
         if fu:
             rec.update(prefixed(fu, 'FOLLOWUP'))
             rec['_has_followup'] = True
@@ -722,6 +761,23 @@ def compute_knowledge(df, pre_cols, post_cols):
     return results
 
 
+def _normalize_likert_label(text):
+    """Normalize Likert question wording for PRE/POST matching."""
+    t = text.strip()
+    # Nexus uses "WILL YOU NOW" / "ARE YOU NOW" for post; Exchange uses "DO YOU CURRENTLY"
+    replacements = [
+        ('WILL YOU NOW', 'DO YOU CURRENTLY'),
+        ('ARE YOU NOW', 'ARE YOU CURRENTLY'),
+        ('DO YOU NOW', 'DO YOU CURRENTLY'),
+        (' NOW ', ' CURRENTLY '),
+    ]
+    tu = t.upper()
+    for old, new in replacements:
+        tu = tu.replace(old, new)
+    # Return normalized version preserving original case structure
+    return tu
+
+
 def compute_competence(df, pre_cols, post_cols):
     """Match PRE/POST Likert column pairs and compute mean shifts."""
     def disp(col):
@@ -733,9 +789,11 @@ def compute_competence(df, pre_cols, post_cols):
         return _display_of_key(c).strip()
 
     post_by_disp = {}
+    post_by_norm = {}
     for col in post_cols:
         d = disp(col)
         post_by_disp[d] = col
+        post_by_norm[_normalize_likert_label(d)] = col
 
     results = []
     for pre_col in pre_cols:
@@ -744,6 +802,25 @@ def compute_competence(df, pre_cols, post_cols):
             continue
         d = disp(pre_col)
         post_col = post_by_disp.get(d)
+        if post_col is None:
+            # Try normalized label matching (handles CURRENTLY vs NOW)
+            post_col = post_by_norm.get(_normalize_likert_label(d))
+        if post_col is None:
+            # Fuzzy word overlap
+            pre_words = set(d.upper().split())
+            # Remove time-point words that differ between pre/post
+            time_words = {'CURRENTLY', 'NOW', 'WILL', 'YOU', 'DO', 'ARE'}
+            pre_core = pre_words - time_words
+            best_match = None
+            best_score = 0
+            for pd_disp, pc in post_by_disp.items():
+                pc_words = set(pd_disp.upper().split()) - time_words
+                if not pre_core: continue
+                score = len(pre_core & pc_words) / len(pre_core)
+                if score > best_score and score >= 0.5:
+                    best_score = score
+                    best_match = pc
+            post_col = best_match
 
         pre_scores  = [s for s in scores if s is not None]
         post_scores = []
