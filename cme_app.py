@@ -241,13 +241,30 @@ def parse_nexus(file_bytes):
                 if e:
                     fu_map[e] = r
 
-    # Helper to prefix keys
+    # Helper to prefix keys — strips long Nexus question prefixes
+    NEXUS_STRIP_PREFIXES = [
+        'Please indicate the extent of your agreement with the following statements:>> ',
+        'Please indicate the extent of your agreement with the following statements: ',
+        'Upon completion of this activity, participants will be able to:>> ',
+        'Upon completion of this activity, participants will be able to: ',
+    ]
+    def clean_key(k):
+        """Strip verbose Nexus prefixes from column names so they merge with Exchange."""
+        for pfx in NEXUS_STRIP_PREFIXES:
+            if k.startswith(pfx):
+                return k[len(pfx):]
+            # Case-insensitive check
+            if k.lower().startswith(pfx.lower()):
+                return k[len(pfx):]
+        return k
+
     def prefixed(row_dict, prefix, exclude_keys=None):
         out = {}
         for k, v in row_dict.items():
             if exclude_keys and k in exclude_keys:
                 continue
-            out[f"{prefix}_{k}"] = v
+            cleaned = clean_key(k)
+            out[f"{prefix}_{cleaned}"] = v
         return out
 
     records = []
@@ -1166,7 +1183,8 @@ def render_analyzer():
 
     # ── Tabs ──
     tabs = st.tabs(["📊 Knowledge", "🎯 Competence", "📋 Evaluation",
-                    "📈 Satisfaction", "🔄 Behavior / Barriers"])
+                    "📈 Satisfaction", "🔄 Behavior / Barriers",
+                    "🏆 Kirkpatrick", "⭕ CIRCLE", "🤖 AI Insights", "📝 JCEHP Article"])
 
     # ─── Knowledge tab ───────────────────────────────────────────────────────
     with tabs[0]:
@@ -1331,6 +1349,290 @@ def render_analyzer():
         st.markdown("#### Follow-Up")
         metric_card("Follow-Up Respondents", ev.get('followup_n', 0),
                      info="Completed follow-up survey")
+
+    # ─── Kirkpatrick tab ─────────────────────────────────────────────────────
+    with tabs[5]:
+        st.markdown("#### Kirkpatrick Model of Learning Evaluation")
+        st.caption("Four levels measuring the effectiveness of this CME program")
+        ev_k = compute_evaluation(df, eval_cols)
+        kn_k = compute_knowledge(df, pre_cols, post_cols)
+        comp_k = compute_competence(df, pre_cols, post_cols)
+
+        # Level 1 — Reaction
+        sat_items = ev_k.get('satisfaction', [])
+        avg_sat = round(sum(s['pct'] for s in sat_items) / len(sat_items), 1) if sat_items else None
+        with st.expander("**Level 1 — Reaction** (Learner Satisfaction)", expanded=True):
+            st.markdown("*Did learners find the program engaging and relevant?*")
+            if avg_sat:
+                st.metric("Average Satisfaction", f"{avg_sat}%", help="Avg % Agree/Strongly Agree across satisfaction items")
+                for s in sat_items:
+                    st.markdown(f"- {s['label'][:65]}: **{s['pct']}%** (n={s['n']})")
+            else:
+                st.info("No satisfaction data available.")
+
+        # Level 2 — Learning
+        with st.expander("**Level 2 — Learning** (Knowledge & Competence Gains)", expanded=True):
+            st.markdown("*Did learners acquire new knowledge and skills?*")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("**Knowledge (MCQ)**")
+                if kn_k:
+                    for r in kn_k:
+                        gain_str = f"+{r['gain']}pp" if r['gain'] else "—"
+                        st.markdown(f"- {r['label'][:50]}: **{gain_str}**")
+                else:
+                    st.info("No MCQ data.")
+            with c2:
+                st.markdown("**Competence (Likert)**")
+                if comp_k:
+                    for r in comp_k:
+                        delta = f"+{r['delta_mean']}" if r['delta_mean'] else "—"
+                        st.markdown(f"- {r['label'][:50]}: **{delta}** mean shift")
+                else:
+                    st.info("No Likert data.")
+
+        # Level 3 — Behavior
+        intent_pct = ev_k.get('intent', {}).get('pct')
+        intent_n   = ev_k.get('intent', {}).get('n', 0)
+        with st.expander("**Level 3 — Behavior** (Intent to Change Practice)", expanded=True):
+            st.markdown("*Did learners intend to apply what they learned?*")
+            if intent_pct is not None:
+                st.metric("Intent to Change Practice", f"{intent_pct}%", f"n={intent_n}")
+                bc = ev_k.get('behavior_change', {})
+                if bc:
+                    st.markdown("**Planned behavior changes:**")
+                    for item, cnt in sorted(bc.items(), key=lambda x: x[1], reverse=True)[:5]:
+                        st.markdown(f"- {str(item)[:70]}: {cnt} respondents")
+            else:
+                st.info("No intent to change data available.")
+
+        # Level 4 — Results
+        fu_n = ev_k.get('followup_n', 0)
+        with st.expander("**Level 4 — Results** (Actual Practice Change)", expanded=True):
+            st.markdown("*Did learners actually change their practice?*")
+            if fu_n > 0:
+                st.metric("Follow-Up Respondents", fu_n)
+                st.info("Follow-up data available — review Behavior/Barriers tab for details.")
+            else:
+                st.info("No follow-up data collected for this program.")
+
+    # ─── CIRCLE tab ──────────────────────────────────────────────────────────
+    with tabs[6]:
+        st.markdown("#### CIRCLE Framework for CE/CPD Outcomes")
+        st.caption("An emerging outcomes model mapping learning to six dimensions of physician identity")
+        ev_c = compute_evaluation(df, eval_cols)
+        kn_c = compute_knowledge(df, pre_cols, post_cols)
+        comp_c = compute_competence(df, pre_cols, post_cols)
+
+        circle_dims = [
+            ("🎓 Competence", "Knowledge and skill gains from this activity",
+             f"{len(kn_c)} MCQ questions analyzed, {len(comp_c)} Likert items analyzed"),
+            ("💪 Confidence", "Learner confidence to apply new knowledge independently",
+             f"Avg Likert pre-mean: {round(sum(r['pre_mean'] for r in comp_c)/len(comp_c),2) if comp_c else '—'}  →  Avg post-mean: {round(sum(r['post_mean'] for r in comp_c if r['post_mean'])/max(1,sum(1 for r in comp_c if r['post_mean'])),2) if comp_c else '—'}"),
+            ("🤝 Relationships", "Impact on patient communication and shared decision-making",
+             "Derived from intent to change and behavior change items related to patient interaction"),
+            ("🌍 Community", "Broader practice and system-level impact",
+             f"System barriers identified: {len(ev_c.get('barrier_system', {}))} categories"),
+            ("📚 Learning", "Engagement with educational content",
+             f"Content rated as new: {ev_c.get('content_new', {}).get('pct', '—')}%  |  Satisfaction avg: {round(sum(s['pct'] for s in ev_c.get('satisfaction',[])) / max(1,len(ev_c.get('satisfaction',[]))) ,1) if ev_c.get('satisfaction') else '—'}%"),
+            ("🔬 Evidence", "Evidence-based practice adoption",
+             f"Intent to change: {ev_c.get('intent',{}).get('pct','—')}%  |  Would recommend: {ev_c.get('recommend',{}).get('pct','—')}%"),
+        ]
+
+        c1, c2 = st.columns(2)
+        for i, (title, desc, data) in enumerate(circle_dims):
+            with (c1 if i % 2 == 0 else c2):
+                st.markdown(f"**{title}**")
+                st.caption(desc)
+                st.info(data)
+                st.markdown("")
+
+        st.markdown("---")
+        st.caption("The CIRCLE Framework is an emerging model in CE/CPD outcomes measurement. "
+                   "Full implementation requires program-specific mapping of questions to each dimension.")
+
+    # ─── AI Insights tab ─────────────────────────────────────────────────────
+    with tabs[7]:
+        st.markdown("#### AI-Generated Outcomes Analysis")
+        st.caption("Powered by Claude — generates grant-ready narrative from your data")
+
+        ev_ai = compute_evaluation(df, eval_cols)
+        kn_ai = compute_knowledge(df, pre_cols, post_cols)
+        comp_ai = compute_competence(df, pre_cols, post_cols)
+
+        # Build data summary for the prompt
+        def build_data_summary():
+            lines = []
+            lines.append(f"PROGRAM OVERVIEW")
+            lines.append(f"Total learners: {len(df)}")
+            lines.append(f"Pre+Post matched: {has_post}")
+            lines.append(f"With evaluation: {has_eval}")
+            lines.append(f"Follow-up: {has_fu}")
+            lines.append(f"Exchange: {ex_n}, Nexus: {nx_n}")
+            lines.append("")
+            lines.append("KNOWLEDGE GAINS (MCQ % Correct)")
+            for r in kn_ai:
+                lines.append(f"- {r['label'][:60]}: Pre {r['pre_pct']}% → Post {r['post_pct']}% (gain +{r['gain']}pp, p={r['p_val']})")
+            lines.append("")
+            lines.append("COMPETENCE SHIFTS (Likert)")
+            for r in comp_ai:
+                lines.append(f"- {r['label'][:60]}: Pre {r['pre_mean']} → Post {r['post_mean']} (Δ{r['delta_mean']}, p={r['p_val']})")
+            lines.append("")
+            lines.append("EVALUATION METRICS")
+            lines.append(f"Intent to Change: {ev_ai.get('intent',{}).get('pct')}% (n={ev_ai.get('intent',{}).get('n')})")
+            lines.append(f"Would Recommend: {ev_ai.get('recommend',{}).get('pct')}% (n={ev_ai.get('recommend',{}).get('n')})")
+            lines.append(f"Bias-Free: {ev_ai.get('bias_free',{}).get('pct')}%")
+            lines.append(f"Content New: {ev_ai.get('content_new',{}).get('pct')}%")
+            lines.append("")
+            lines.append("SATISFACTION (% Agree/Strongly Agree)")
+            for s in ev_ai.get('satisfaction', []):
+                lines.append(f"- {s['label'][:60]}: {s['pct']}%")
+            return "\n".join(lines)
+
+        if 'ai_insights' not in st.session_state:
+            st.session_state.ai_insights = None
+
+        col_btn1, col_btn2 = st.columns([1, 4])
+        with col_btn1:
+            if st.button("🤖 Generate Insights", type="primary"):
+                with st.spinner("Analyzing outcomes data…"):
+                    try:
+                        import requests
+                        data_summary = build_data_summary()
+                        prompt = f"""You are an expert in CME/CE outcomes analysis and medical education research.
+
+Analyze the following CME program outcomes data and generate a comprehensive grant-ready narrative report.
+
+{data_summary}
+
+Please provide:
+1. EXECUTIVE SUMMARY (2-3 sentences, highlight key findings)
+2. KNOWLEDGE OUTCOMES (discuss MCQ gains with statistics, Moore's Level 2)
+3. COMPETENCE OUTCOMES (discuss Likert shifts, Moore's Level 3)
+4. PRACTICE IMPACT (intent to change, behavior change, Moore's Level 4)
+5. PROGRAM QUALITY (satisfaction, bias-free, content novelty)
+6. RECOMMENDATIONS (2-3 specific recommendations for future programs)
+
+Use specific statistics. Frame for a pharmaceutical grant outcomes report. Be concise but thorough."""
+
+                        response = requests.post(
+                            "https://api.anthropic.com/v1/messages",
+                            headers={"Content-Type": "application/json"},
+                            json={
+                                "model": "claude-sonnet-4-20250514",
+                                "max_tokens": 1500,
+                                "messages": [{"role": "user", "content": prompt}]
+                            },
+                            timeout=60
+                        )
+                        result = response.json()
+                        if 'content' in result and result['content']:
+                            st.session_state.ai_insights = result['content'][0]['text']
+                        else:
+                            st.session_state.ai_insights = f"Error: {result.get('error', {}).get('message', 'Unknown error')}"
+                    except Exception as e:
+                        st.session_state.ai_insights = f"Error generating insights: {str(e)}"
+
+        with col_btn2:
+            if st.session_state.ai_insights:
+                if st.button("↺ Regenerate"):
+                    st.session_state.ai_insights = None
+                    st.rerun()
+
+        if st.session_state.ai_insights:
+            st.markdown(st.session_state.ai_insights)
+            st.download_button(
+                "⬇ Download Insights",
+                st.session_state.ai_insights,
+                file_name="CME_AI_Insights.txt",
+                mime="text/plain"
+            )
+        else:
+            st.info("Click **Generate Insights** to produce a grant-ready outcomes narrative powered by AI.")
+
+    # ─── JCEHP Article tab ───────────────────────────────────────────────────
+    with tabs[8]:
+        st.markdown("#### JCEHP Article Writer")
+        st.caption("Generate a publication-ready manuscript in JCEHP format")
+
+        ev_j = compute_evaluation(df, eval_cols)
+        kn_j = compute_knowledge(df, pre_cols, post_cols)
+        comp_j = compute_competence(df, pre_cols, post_cols)
+
+        prog_name = st.text_input("Program title (for article)", 
+                                   placeholder="e.g. Overcoming Obstacles to MASH Diagnosis and Treatment")
+        therapeutic_area = st.text_input("Therapeutic area",
+                                          placeholder="e.g. Metabolic Dysfunction-Associated Steatohepatitis (MASH)")
+
+        if 'jcehp_article' not in st.session_state:
+            st.session_state.jcehp_article = None
+
+        if st.button("📝 Write JCEHP Article", type="primary"):
+            if not prog_name:
+                st.warning("Please enter a program title first.")
+            else:
+                with st.spinner("Writing manuscript…"):
+                    try:
+                        import requests
+                        def build_jcehp_data():
+                            lines = [f"Program: {prog_name}", f"Therapeutic area: {therapeutic_area}",
+                                     f"Total learners: {len(df)}", f"Pre/Post matched: {has_post}",
+                                     f"With evaluation: {has_eval}"]
+                            for r in kn_j:
+                                lines.append(f"MCQ: {r['label'][:60]} Pre={r['pre_pct']}% Post={r['post_pct']}% p={r['p_val']}")
+                            for r in comp_j:
+                                lines.append(f"Likert: {r['label'][:60]} Pre={r['pre_mean']} Post={r['post_mean']} p={r['p_val']}")
+                            lines.append(f"Intent to change: {ev_j.get('intent',{}).get('pct')}%")
+                            lines.append(f"Would recommend: {ev_j.get('recommend',{}).get('pct')}%")
+                            lines.append(f"Bias-free: {ev_j.get('bias_free',{}).get('pct')}%")
+                            lines.append(f"Content new: {ev_j.get('content_new',{}).get('pct')}%")
+                            for s in ev_j.get('satisfaction',[]):
+                                lines.append(f"Satisfaction: {s['label'][:50]}={s['pct']}%")
+                            return "\n".join(lines)
+
+                        prompt = f"""Write a complete, publication-ready manuscript for the Journal of Continuing Education in the Health Professions (JCEHP).
+
+DATA:
+{build_jcehp_data()}
+
+Format as a full JCEHP manuscript with these sections:
+- STRUCTURED ABSTRACT (Background, Methods, Results, Conclusions — 250 words max)
+- INTRODUCTION (significance of the educational gap, 2 paragraphs)
+- METHODS (activity design, accreditation, assessment instruments, statistical analysis)
+- RESULTS (all statistics presented with n values and p-values where applicable)
+- DISCUSSION (interpretation of findings, limitations, implications for CE/CPD)
+- CONCLUSIONS (key takeaways for the field)
+
+Use formal academic language. Include all statistics from the data. Write as if for peer review submission."""
+
+                        response = requests.post(
+                            "https://api.anthropic.com/v1/messages",
+                            headers={"Content-Type": "application/json"},
+                            json={
+                                "model": "claude-sonnet-4-20250514",
+                                "max_tokens": 2000,
+                                "messages": [{"role": "user", "content": prompt}]
+                            },
+                            timeout=90
+                        )
+                        result = response.json()
+                        if 'content' in result and result['content']:
+                            st.session_state.jcehp_article = result['content'][0]['text']
+                        else:
+                            st.session_state.jcehp_article = f"Error: {result.get('error',{}).get('message','Unknown error')}"
+                    except Exception as e:
+                        st.session_state.jcehp_article = f"Error: {str(e)}"
+
+        if st.session_state.jcehp_article:
+            st.markdown(st.session_state.jcehp_article)
+            st.download_button(
+                "⬇ Download Article",
+                st.session_state.jcehp_article,
+                file_name="JCEHP_Article_Draft.txt",
+                mime="text/plain"
+            )
+        else:
+            st.info("Enter the program title and click **Write JCEHP Article** to generate a draft manuscript.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
