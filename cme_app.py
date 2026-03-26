@@ -452,10 +452,7 @@ def load_combined(file_bytes) -> pd.DataFrame:
 def classify_cols(df: pd.DataFrame):
     """
     Classify columns into sections.
-
-    MCQ FIX: columns that were deduplicated by write_combined_excel() carry
-    a  __PRE / __POST / __EVAL  suffix.  We use that suffix when present;
-    otherwise we fall back to the original section-prefix heuristic.
+    MCQ FIX: columns deduplicated by write_combined_excel() carry __PRE/__POST/__EVAL suffix.
     """
     pre_cols  = []
     post_cols = []
@@ -464,19 +461,12 @@ def classify_cols(df: pd.DataFrame):
 
     for col in df.columns:
         cu = col.upper()
-
-        # ── Dedup-suffix detection (MCQ fix) ──
         if cu.endswith('__PRE'):
-            pre_cols.append(col)
-            continue
+            pre_cols.append(col); continue
         if cu.endswith('__POST'):
-            post_cols.append(col)
-            continue
+            post_cols.append(col); continue
         if cu.endswith('__EVAL'):
-            eval_cols.append(col)
-            continue
-
-        # ── Original prefix heuristic ──
+            eval_cols.append(col); continue
         if cu.startswith('PRE_'):
             pre_cols.append(col)
         elif cu.startswith('POST_'):
@@ -484,11 +474,8 @@ def classify_cols(df: pd.DataFrame):
         elif cu.startswith('EVAL_'):
             eval_cols.append(col)
         elif cu.startswith('FOLLOWUP_'):
-            eval_cols.append(col)   # treat follow-up as eval-level
-        elif cu.startswith('META_') or cu.startswith('_'):
-            meta_cols.append(col)
+            eval_cols.append(col)
         else:
-            # No recognizable prefix — sniff by content
             meta_cols.append(col)
 
     return pre_cols, post_cols, eval_cols, meta_cols
@@ -1029,9 +1016,10 @@ def render_analyzer():
             )
         else:
             for r in sorted(kn_results, key=lambda x: (x['gain'] or -999), reverse=True):
+                post_str = f"{r['post_pct']}%" if r['post_pct'] is not None else "—"
                 with st.expander(f"**{r['label'][:70]}** — "
                                   f"Pre: {r['pre_pct']}%  →  "
-                                  f"Post: {r['post_pct'] or '—'}%  "
+                                  f"Post: {post_str}  "
                                   f"({pval_badge(r['p_val'])})",
                                   unsafe_allow_html=True):
                     c1, c2, c3 = st.columns(3)
