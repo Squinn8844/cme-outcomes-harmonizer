@@ -68,6 +68,21 @@ def parse_exchange(file_bytes):
     if eval_start is None: eval_start = post_start + 8
 
     # ── Build column map ──
+    # Sort section boundaries so we assign correctly regardless of column order
+    # Build a list of (start_col, section) sorted by position
+    section_boundaries = []
+    if pre_start  is not None: section_boundaries.append((pre_start,  'pre'))
+    if post_start is not None: section_boundaries.append((post_start, 'post'))
+    if eval_start is not None: section_boundaries.append((eval_start, 'eval'))
+    section_boundaries.sort(key=lambda x: x[0])
+
+    def get_section(col_idx):
+        sec = 'meta'
+        for start, name in section_boundaries:
+            if col_idx >= start:
+                sec = name
+        return sec
+
     cols = []
     n = max(len(r0), len(r2))
     for i in range(n):
@@ -78,10 +93,7 @@ def parse_exchange(file_bytes):
         if not header:
             continue
 
-        sec = 'meta'
-        if   i >= eval_start:  sec = 'eval'
-        elif i >= post_start:  sec = 'post'
-        elif i >= pre_start:   sec = 'pre'
+        sec = get_section(i)
         cols.append({'header': header, 'section': sec, 'idx': i})
 
     # ── Build records ──
@@ -156,17 +168,18 @@ def parse_nexus(file_bytes):
     """
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
 
-    def sheet(name):
-        for s in wb.sheetnames:
-            if s.strip().lower() == name.lower():
-                return _nexus_sheet_to_dicts(wb[s])
+    def sheet(*names):
+        for name in names:
+            for s in wb.sheetnames:
+                if s.strip().lower() == name.lower():
+                    return _nexus_sheet_to_dicts(wb[s])
         return []
 
     pre_non  = sheet('PreNon')
     pre_rows = sheet('Pre')
     post_rows= sheet('Post')
     eval_rows= sheet('Eval')
-    fu_rows  = sheet('Follow Up')
+    fu_rows  = sheet('Follow Up', 'Follow-Up', 'FollowUp')
     wb.close()
 
     # ── Join key: try email first, then token/ID ──
@@ -200,18 +213,22 @@ def parse_nexus(file_bytes):
 
     # ── Build email/token→eval map ──
     eval_map = {}
+    eval_positional = []  # always build positional fallback
     if eval_rows:
         pre_src = pre_rows or pre_non
         join_pre, join_ev = find_join_key(pre_src, eval_rows)
         if join_ev:
-            for r in eval_rows:
-                e = str(r.get(join_ev, '') or '').strip().lower()
-                if e:
-                    eval_map[e] = r
-        # Fallback: if no join key found, join by row position for Eval
-        if not eval_map and eval_rows:
-            for i, r in enumerate(eval_rows):
-                eval_map[f'__idx__{i}'] = r
+            # Verify the join actually works (IDs overlap)
+            pre_vals = {str(r.get(join_pre, '') or '').strip().lower() for r in pre_src if r.get(join_pre)}
+            ev_vals  = {str(r.get(join_ev,  '') or '').strip().lower() for r in eval_rows  if r.get(join_ev)}
+            overlap  = pre_vals & ev_vals
+            if overlap:  # join by key only if there's actual overlap
+                for r in eval_rows:
+                    e = str(r.get(join_ev, '') or '').strip().lower()
+                    if e:
+                        eval_map[e] = r
+        # Always build positional index as fallback
+        eval_positional = eval_rows
 
     # ── Build email/token→fu map ──
     fu_map = {}
@@ -250,7 +267,9 @@ def parse_nexus(file_bytes):
         }
         rec.update(prefixed(pre, 'META'))
         # Try join by value, then by position fallback
-        ev = eval_map.get(jval) or eval_map.get(f'__idx__{idx}')
+        ev = eval_map.get(jval)
+        if ev is None and eval_positional and idx < len(eval_positional):
+            ev = eval_positional[idx]
         if ev:
             rec.update(prefixed(ev, 'EVAL'))
             rec['_has_eval'] = True
@@ -273,8 +292,12 @@ def parse_nexus(file_bytes):
         rec.update(prefixed(pre, 'META'))
         if post:
             rec.update(prefixed(post, 'POST'))
-        # Try join by value, then by position fallback (offset by pre_non length)
-        ev = eval_map.get(jval) or eval_map.get(f'__idx__{len(pre_non) + i}')
+        # Try join by value, then by position fallback (offset by pre_non count)
+        ev = eval_map.get(jval)
+        if ev is None and eval_positional:
+            pos = len(pre_non) + i
+            if pos < len(eval_positional):
+                ev = eval_positional[pos]
         if ev:
             rec.update(prefixed(ev, 'EVAL'))
             rec['_has_eval'] = True
@@ -585,8 +608,9 @@ def is_mcq_col(col_name, series):
     for pat in skip_patterns:
         if pat in cn:
             return False
-    # Must have question-like text (>20 chars)
-    if len(col_name) < 20:
+    # Must have question-like text (>20 chars) — strip HTML tags for length check
+    clean_name = re.sub(r'<[^>]+>', '', col_name)
+    if len(clean_name) < 20:
         return False
     # Values should be mostly text answers (not numbers, not pure Likert)
     non_null = series.dropna()
@@ -730,6 +754,16 @@ def compute_knowledge(df, pre_cols, post_cols):
                     break
 
         correct = get_correct_answer(pre_col)
+
+        # If no correct answer defined, try to infer from post (most common post answer)
+        inferred = False
+        if correct is None and post_col is not None:
+            post_nn = df[post_col].dropna()
+            if len(post_nn) > 0:
+                most_common = post_nn.value_counts().index[0]
+                correct = str(most_common).strip()
+                inferred = True
+
         pre_result  = pct_correct(df[pre_col],  correct)
         post_result = pct_correct(df[post_col], correct) if post_col else None
 
@@ -755,6 +789,7 @@ def compute_knowledge(df, pre_cols, post_cols):
             'post_n':   post_n,
             'p_val':    p_val,
             'correct':  correct,
+            'inferred': inferred,
             'pre_col':  pre_col,
             'post_col': post_col,
         })
@@ -1160,6 +1195,8 @@ def render_analyzer():
                     c3.metric("Gain", f"{r['gain']:+.1f}pp" if r['gain'] is not None else "—")
 
                     st.markdown("**Definition:** % of respondents selecting the correct answer")
+                    if r.get('inferred'):
+                        st.caption(f"⚠ Correct answer inferred from most common post-test response — verify accuracy")
                     st.markdown(f"**Correct answer:** `{r['correct']}`")
                     st.markdown(f"**Formula:** (# correct) ÷ (# answered) × 100")
                     st.markdown(f"**p-value:** {pval_badge(r['p_val'])}", unsafe_allow_html=True)
