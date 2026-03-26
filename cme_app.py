@@ -1039,21 +1039,71 @@ def compute_evaluation(df, eval_cols):
 #  SECTION 6 — STREAMLIT UI HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def metric_card(label, value, delta=None, info=None):
+def metric_card(label, value, delta=None, info=None, color="#3b82f6"):
     delta_html = ''
     if delta is not None:
-        color = '#22c55e' if delta >= 0 else '#ef4444'
-        sign  = '+' if delta >= 0 else ''
-        delta_html = f'<span style="color:{color};font-size:14px">{sign}{delta}</span>'
-    info_html = f'<span title="{info}" style="cursor:help;color:#94a3b8;font-size:11px"> ℹ</span>' if info else ''
+        dc = '#22c55e' if delta >= 0 else '#ef4444'
+        sign = '+' if delta >= 0 else ''
+        delta_html = f'<div style="color:{dc};font-size:13px;margin-top:4px">{sign}{delta}</div>'
+    info_html = f'<span title="{info}" style="cursor:help;color:#64748b;font-size:11px"> ℹ</span>' if info else ''
     st.markdown(f"""
-<div style="background:#1c2130;border:1px solid #252b38;border-radius:10px;
-            padding:16px 20px;text-align:center;margin-bottom:8px">
-  <div style="font-size:12px;color:#94a3b8;margin-bottom:6px">{label}{info_html}</div>
-  <div style="font-size:28px;font-weight:700;color:#e2e8f0">{value}</div>
+<div style="background:linear-gradient(135deg,#1e293b,#0f172a);
+            border:1px solid {color}40;border-radius:14px;
+            padding:18px 16px;text-align:center;margin-bottom:8px;
+            box-shadow:0 4px 12px {color}20">
+  <div style="font-size:11px;color:#64748b;text-transform:uppercase;
+              letter-spacing:1px;margin-bottom:8px">{label}{info_html}</div>
+  <div style="font-size:30px;font-weight:800;color:#f1f5f9;
+              background:linear-gradient(135deg,#f1f5f9,{color});
+              -webkit-background-clip:text;-webkit-text-fill-color:transparent">{value}</div>
   {delta_html}
 </div>
 """, unsafe_allow_html=True)
+
+
+def progress_bar_html(pct, color="#3b82f6", label="", show_pct=True):
+    """Render a colored progress bar."""
+    if pct is None:
+        return ""
+    safe_pct = min(100, max(0, pct))
+    pct_text = f"{pct}%" if show_pct else ""
+    return f"""
+<div style="margin:6px 0">
+  <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+    <span style="font-size:12px;color:#cbd5e1">{label}</span>
+    <span style="font-size:12px;font-weight:700;color:#f1f5f9">{pct_text}</span>
+  </div>
+  <div style="background:#1e293b;border-radius:6px;height:10px;overflow:hidden">
+    <div style="background:linear-gradient(90deg,{color},{color}cc);
+                width:{safe_pct}%;height:100%;border-radius:6px;
+                transition:width 0.3s ease"></div>
+  </div>
+</div>"""
+
+
+def donut_metric(label, pct, color="#3b82f6", n=None):
+    """SVG donut chart for a single percentage metric."""
+    if pct is None:
+        pct = 0
+    safe_pct = min(100, max(0, pct))
+    r = 36
+    circ = 2 * 3.14159 * r
+    dash = (safe_pct / 100) * circ
+    n_text = f"n={n}" if n else ""
+    return f"""
+<div style="text-align:center;padding:12px 8px">
+  <svg width="100" height="100" viewBox="0 0 100 100">
+    <circle cx="50" cy="50" r="{r}" fill="none" stroke="#1e293b" stroke-width="10"/>
+    <circle cx="50" cy="50" r="{r}" fill="none" stroke="{color}" stroke-width="10"
+            stroke-dasharray="{dash:.1f} {circ:.1f}"
+            stroke-dashoffset="{circ/4:.1f}"
+            stroke-linecap="round"/>
+    <text x="50" y="46" text-anchor="middle" fill="#f1f5f9"
+          font-size="16" font-weight="800">{pct}%</text>
+    <text x="50" y="60" text-anchor="middle" fill="#64748b" font-size="9">{n_text}</text>
+  </svg>
+  <div style="font-size:11px;color:#94a3b8;margin-top:4px;font-weight:600">{label}</div>
+</div>"""
 
 
 def pval_badge(p):
@@ -1187,6 +1237,67 @@ def render_analyzer():
     st.caption(f"Exchange: {ex_n}  |  Nexus: {nx_n}  |  "
                f"Pre cols: {len(pre_cols)}  |  Post cols: {len(post_cols)}  |  "
                f"Eval cols: {len(eval_cols)}")
+
+    # ── Key Insights Panel ──
+    ev_ov = compute_evaluation(df, eval_cols)
+    kn_ov = compute_knowledge(df, pre_cols, post_cols)
+
+    st.markdown("### 📈 Key Insights")
+    
+    # Donut charts row
+    d1, d2, d3, d4 = st.columns(4)
+    with d1:
+        intent_m = ev_ov.get('intent', {})
+        st.markdown(donut_metric("Intent to Change",
+            intent_m.get('pct'), "#3b82f6", intent_m.get('n')), unsafe_allow_html=True)
+    with d2:
+        rec_m = ev_ov.get('recommend', {})
+        st.markdown(donut_metric("Would Recommend",
+            rec_m.get('pct'), "#22c55e", rec_m.get('n')), unsafe_allow_html=True)
+    with d3:
+        bias_m = ev_ov.get('bias_free', {})
+        st.markdown(donut_metric("Bias-Free",
+            bias_m.get('pct'), "#a855f7", bias_m.get('n')), unsafe_allow_html=True)
+    with d4:
+        new_m = ev_ov.get('content_new', {})
+        st.markdown(donut_metric("Content Was New",
+            new_m.get('pct'), "#f59e0b", new_m.get('n')), unsafe_allow_html=True)
+
+    # Knowledge gains progress bars
+    if kn_ov:
+        st.markdown("**Knowledge Gains**")
+        for r in sorted(kn_ov, key=lambda x: x['gain'] or 0, reverse=True):
+            if r['pre_pct'] is not None and r['post_pct'] is not None:
+                col_a, col_b = st.columns([3, 1])
+                with col_a:
+                    st.markdown(
+                        progress_bar_html(r['post_pct'], "#3b82f6",
+                                          f"{r['label'][:55]}") +
+                        progress_bar_html(r['pre_pct'], "#64748b", "Pre-test"),
+                        unsafe_allow_html=True)
+                with col_b:
+                    gain = r['gain']
+                    color = "#22c55e" if gain and gain > 0 else "#ef4444"
+                    st.markdown(f"""
+<div style="text-align:center;padding:8px;background:#1e293b;
+            border-radius:10px;margin-top:4px">
+  <div style="font-size:10px;color:#64748b">GAIN</div>
+  <div style="font-size:20px;font-weight:800;color:{color}">
+    {"+" if gain and gain > 0 else ""}{gain}pp</div>
+</div>""", unsafe_allow_html=True)
+
+    # Satisfaction progress bars
+    sat_items = ev_ov.get('satisfaction', [])
+    if sat_items:
+        st.markdown("**Satisfaction**")
+        colors = ["#3b82f6","#22c55e","#a855f7","#f59e0b","#ef4444","#06b6d4","#ec4899","#84cc16"]
+        sat_html = ""
+        for i, s in enumerate(sorted(sat_items, key=lambda x: x['pct'] or 0, reverse=True)):
+            sat_html += progress_bar_html(s['pct'], colors[i % len(colors)],
+                                          s['label'][:60])
+        st.markdown(sat_html, unsafe_allow_html=True)
+
+    st.markdown("---")
 
     # ── Tabs ──
     tabs = st.tabs(["📊 Knowledge", "🎯 Competence", "📋 Evaluation",
@@ -1463,6 +1574,17 @@ def render_analyzer():
         st.markdown("#### AI-Generated Outcomes Analysis")
         st.caption("Powered by Claude — generates grant-ready narrative from your data")
 
+        # API Key input
+        api_key = st.text_input(
+            "Anthropic API Key",
+            type="password",
+            placeholder="sk-ant-...",
+            help="Get your key at console.anthropic.com → API Keys. It is not stored."
+        )
+        if not api_key:
+            st.info("Enter your Anthropic API key above to enable AI Insights. "
+                    "Get one free at **console.anthropic.com**")
+
         ev_ai = compute_evaluation(df, eval_cols)
         kn_ai = compute_knowledge(df, pre_cols, post_cols)
         comp_ai = compute_competence(df, pre_cols, post_cols)
@@ -1501,7 +1623,7 @@ def render_analyzer():
 
         col_btn1, col_btn2 = st.columns([1, 4])
         with col_btn1:
-            if st.button("🤖 Generate Insights", type="primary"):
+            if st.button("🤖 Generate Insights", type="primary", disabled=not api_key):
                 with st.spinner("Analyzing outcomes data…"):
                     try:
                         import requests
@@ -1524,7 +1646,11 @@ Use specific statistics. Frame for a pharmaceutical grant outcomes report. Be co
 
                         response = requests.post(
                             "https://api.anthropic.com/v1/messages",
-                            headers={"Content-Type": "application/json"},
+                            headers={
+                                "Content-Type": "application/json",
+                                "x-api-key": api_key,
+                                "anthropic-version": "2023-06-01"
+                            },
                             json={
                                 "model": "claude-sonnet-4-20250514",
                                 "max_tokens": 1500,
@@ -1566,6 +1692,14 @@ Use specific statistics. Frame for a pharmaceutical grant outcomes report. Be co
         kn_j = compute_knowledge(df, pre_cols, post_cols)
         comp_j = compute_competence(df, pre_cols, post_cols)
 
+        api_key_j = st.text_input(
+            "Anthropic API Key",
+            type="password",
+            placeholder="sk-ant-...",
+            key="jcehp_api_key",
+            help="Same key as AI Insights tab"
+        )
+
         prog_name = st.text_input("Program title (for article)", 
                                    placeholder="e.g. Overcoming Obstacles to MASH Diagnosis and Treatment")
         therapeutic_area = st.text_input("Therapeutic area",
@@ -1574,7 +1708,7 @@ Use specific statistics. Frame for a pharmaceutical grant outcomes report. Be co
         if 'jcehp_article' not in st.session_state:
             st.session_state.jcehp_article = None
 
-        if st.button("📝 Write JCEHP Article", type="primary"):
+        if st.button("📝 Write JCEHP Article", type="primary", disabled=not api_key_j):
             if not prog_name:
                 st.warning("Please enter a program title first.")
             else:
@@ -1614,7 +1748,11 @@ Use formal academic language. Include all statistics from the data. Write as if 
 
                         response = requests.post(
                             "https://api.anthropic.com/v1/messages",
-                            headers={"Content-Type": "application/json"},
+                            headers={
+                                "Content-Type": "application/json",
+                                "x-api-key": api_key_j,
+                                "anthropic-version": "2023-06-01"
+                            },
                             json={
                                 "model": "claude-sonnet-4-20250514",
                                 "max_tokens": 2000,
@@ -1655,18 +1793,21 @@ def main():
     )
     st.markdown("""
 <style>
-  [data-testid="stAppViewContainer"] { background: #0d1117; }
+  [data-testid="stAppViewContainer"] { background: #0f172a; }
   [data-testid="stHeader"] { background: transparent; }
-  .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+  .stTabs [data-baseweb="tab-list"] { gap: 6px; background: #1e293b; padding: 6px; border-radius: 10px; }
   .stTabs [data-baseweb="tab"] {
-      background: #1c2130; border-radius: 8px 8px 0 0;
-      padding: 8px 20px; color: #94a3b8;
+      background: transparent; border-radius: 8px;
+      padding: 8px 18px; color: #94a3b8; font-weight: 500;
   }
-  .stTabs [aria-selected="true"] { background: #243046; color: #e2e8f0; }
+  .stTabs [aria-selected="true"] { background: #3b82f6 !important; color: #ffffff !important; }
   div[data-testid="metric-container"] {
-      background: #1c2130; border: 1px solid #252b38;
-      border-radius: 10px; padding: 10px;
+      background: #1e293b; border: 1px solid #334155;
+      border-radius: 12px; padding: 12px;
   }
+  .stExpander { background: #1e293b; border: 1px solid #334155; border-radius: 10px; }
+  h4 { color: #f1f5f9 !important; }
+  .stMarkdown p { color: #cbd5e1; }
 </style>
 """, unsafe_allow_html=True)
 
