@@ -187,29 +187,33 @@ def parse_nexus(file_bytes):
         """Find a key present in both row sets that can be used to join them."""
         if not rows_a or not rows_b:
             return None, None
-        # Try email
-        ka = _nexus_find_key(rows_a, ['email'])
-        kb = _nexus_find_key(rows_b, ['email'])
-        if ka and kb:
-            return ka, kb
-        # Try token
-        ka = _nexus_find_key(rows_a, ['token'])
-        kb = _nexus_find_key(rows_b, ['token'])
-        if ka and kb:
-            return ka, kb
-        # Try any shared key name
         keys_a = set(rows_a[0].keys())
         keys_b = set(rows_b[0].keys())
-        shared = keys_a & keys_b
+        # Try candidates in priority order
         for candidate in ['Email', 'email', 'Token', 'token', 'ID', 'Id', 'id']:
-            if candidate in shared:
-                return candidate, candidate
+            if candidate in keys_a and candidate in keys_b:
+                # Verify there's actual overlap in values
+                vals_a = {str(r.get(candidate,'') or '').strip().lower() for r in rows_a if r.get(candidate)}
+                vals_b = {str(r.get(candidate,'') or '').strip().lower() for r in rows_b if r.get(candidate)}
+                if vals_a & vals_b:
+                    return candidate, candidate
+        # Try partial key name matching
+        for ka in keys_a:
+            for kb in keys_b:
+                if ka.lower() == kb.lower():
+                    vals_a = {str(r.get(ka,'') or '').strip().lower() for r in rows_a if r.get(ka)}
+                    vals_b = {str(r.get(kb,'') or '').strip().lower() for r in rows_b if r.get(kb)}
+                    if vals_a & vals_b:
+                        return ka, kb
         return None, None
 
+    # Join key: try email, token, or ID
     email_key = (_nexus_find_key(pre_rows, ['email']) or
                  _nexus_find_key(pre_non,  ['email']) or
                  _nexus_find_key(pre_rows, ['token']) or
-                 _nexus_find_key(pre_non,  ['token']))
+                 _nexus_find_key(pre_non,  ['token']) or
+                 _nexus_find_key(pre_rows, ['id']) or
+                 _nexus_find_key(pre_non,  ['id']))
 
     # ── Build email/token→eval map ──
     eval_map = {}
@@ -726,10 +730,13 @@ def avg_pct_new(series):
         s = str(v).strip().rstrip('%')
         try:
             f = float(s)
-            if 0 <= f <= 100:
+            # Nexus stores as decimal (0.0-1.0), Exchange as percentage (0-100)
+            # Distinguish: if ALL values in series are <=1.0 treat as decimals
+            # We do this per-value: if f <= 1.0 and not a round number like 25/50/75/100
+            if 0 <= f <= 1.0 and f not in (1.0,) or (f > 0 and f < 1):
+                vals.append(round(f * 100))
+            elif 0 <= f <= 100:
                 vals.append(f)
-            elif 0 <= f <= 1:
-                vals.append(f * 100)
         except ValueError:
             pass
     if not vals:
