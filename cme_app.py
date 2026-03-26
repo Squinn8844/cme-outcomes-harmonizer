@@ -1017,11 +1017,9 @@ def render_analyzer():
         else:
             for r in sorted(kn_results, key=lambda x: (x['gain'] or -999), reverse=True):
                 post_str = f"{r['post_pct']}%" if r['post_pct'] is not None else "—"
-                with st.expander(f"**{r['label'][:70]}** — "
-                                  f"Pre: {r['pre_pct']}%  →  "
-                                  f"Post: {post_str}  "
-                                  f"({pval_badge(r['p_val'])})",
-                                  unsafe_allow_html=True):
+                p = r['p_val']
+                p_str = "p<0.001 ✓" if p and p < 0.001 else (f"p<0.05 ✓" if p and p < 0.05 else (f"p={p:.3f}" if p else "NS"))
+                with st.expander(f"{r['label'][:70]} — Pre: {r['pre_pct']}%  →  Post: {post_str}  ({p_str})"):
                     c1, c2, c3 = st.columns(3)
                     c1.metric("Pre % Correct",  f"{r['pre_pct']}%",   f"n={r['pre_n']}")
                     c2.metric("Post % Correct", f"{r['post_pct']}%" if r['post_pct'] else "—",
@@ -1059,13 +1057,10 @@ def render_analyzer():
         else:
             for r in sorted(comp_results,
                              key=lambda x: (x['delta_pct4'] or -999), reverse=True):
-                with st.expander(
-                    f"**{r['label'][:70]}** — "
-                    f"Pre mean: {r['pre_mean']}  →  "
-                    f"Post mean: {r['post_mean'] or '—'}  "
-                    f"({pval_badge(r['p_val'])})",
-                    unsafe_allow_html=True
-                ):
+                p = r['p_val']
+                p_str = "p<0.001" if p and p < 0.001 else (f"p<0.05" if p and p < 0.05 else (f"p={p:.3f}" if p else "NS"))
+                post_mean_str = str(r['post_mean']) if r['post_mean'] is not None else "—"
+                with st.expander(f"{r['label'][:70]} — Pre: {r['pre_mean']}  → Post: {post_mean_str}  ({p_str}):"):
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("Pre Mean",  r['pre_mean'])
                     c2.metric("Post Mean", r['post_mean'] or "—")
