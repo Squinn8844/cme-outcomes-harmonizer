@@ -1,2176 +1,1731 @@
 """
-Integritas CME Outcomes Harmonizer
-Two-tab Streamlit app:
-  Tab 1 — Merger: upload Exchange + Nexus → download combined Excel
-  Tab 2 — Analyzer: upload combined Excel → full analytics dashboard
-
-MCQ FIX: write_combined_excel() deduplicates column headers by appending
-_PRE / _POST / _EVAL suffix when two columns share the same truncated display
-name.  classify_cols() detects section by suffix rather than position.
+Integritas CME Outcomes Harmonizer v3
+DocuParse-style UI: dark header, horizontal tabs, filter chips, metric modals
+All parser/analytics logic rebuilt and bug-fixed.
 """
-
-import io
-import re
-import math
+import io, re, math, json, textwrap
 from collections import defaultdict
-
 import streamlit as st
 import pandas as pd
+import numpy as np
+from scipy import stats
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
-from scipy import stats
+
+st.set_page_config(page_title="Integritas CME Outcomes Harmonizer", layout="wide", page_icon="🧬")
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 1 — EXCHANGE PARSER
+# STYLES
 # ══════════════════════════════════════════════════════════════════════════════
+st.markdown("""
+<style>
+/* Hide default Streamlit chrome */
+#MainMenu, footer, header {visibility: hidden;}
+.block-container {padding-top: 0 !important; max-width: 100% !important;}
+section[data-testid="stSidebar"] {display: none;}
 
+/* ── APP HEADER ── */
+.app-header {
+  background: #0f172a;
+  border-bottom: 1px solid #1e3a5f;
+  padding: 14px 32px;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+}
+.app-logo {
+  font-size: 20px;
+  font-weight: 700;
+  color: #ffffff;
+  white-space: nowrap;
+}
+.app-logo span {color: #22d3ee;}
+.header-inputs {display: flex; gap: 10px; flex: 1;}
+.header-inputs input {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 6px 12px;
+  color: #e2e8f0;
+  font-size: 13px;
+  width: 200px;
+}
+.badge-ex {
+  background: #7c3aed22;
+  border: 1px solid #7c3aed;
+  color: #a78bfa;
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.badge-nx {
+  background: #16a34a22;
+  border: 1px solid #16a34a;
+  color: #4ade80;
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* ── TAB BAR ── */
+.tab-bar {
+  background: #0f172a;
+  border-bottom: 1px solid #1e293b;
+  padding: 0 32px;
+  display: flex;
+  gap: 0;
+  overflow-x: auto;
+}
+.tab-btn {
+  padding: 12px 18px;
+  color: #94a3b8;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+  background: none;
+  border-top: none;
+  border-left: none;
+  border-right: none;
+  transition: all 0.15s;
+}
+.tab-btn:hover {color: #e2e8f0;}
+.tab-btn.active {color: #22d3ee; border-bottom-color: #22d3ee;}
+
+/* ── ACTION ROW ── */
+.action-row {
+  background: #0f172a;
+  border-bottom: 1px solid #1e293b;
+  padding: 8px 32px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.action-btn {
+  background: #1e293b;
+  border: 1px solid #334155;
+  color: #e2e8f0;
+  padding: 5px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.action-btn:hover {background: #334155;}
+
+/* ── FILTER CHIPS ── */
+.filter-bar {
+  background: #0f172a;
+  border-bottom: 1px solid #1e293b;
+  padding: 8px 32px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.filter-label {color: #64748b; font-size: 11px; font-weight: 600; text-transform: uppercase;}
+.chip {
+  padding: 3px 12px;
+  border-radius: 20px;
+  font-size: 12px;
+  cursor: pointer;
+  border: 1px solid #334155;
+  color: #94a3b8;
+  background: #1e293b;
+}
+.chip.active-all  {border-color: #22d3ee; color: #22d3ee; background: #0891b220;}
+.chip.active-ex   {border-color: #a78bfa; color: #a78bfa; background: #7c3aed20;}
+.chip.active-nx   {border-color: #4ade80; color: #4ade80; background: #16a34a20;}
+.chip.active-spec {border-color: #f59e0b; color: #f59e0b; background: #d9770620;}
+
+/* ── CONTENT AREA ── */
+.content {padding: 24px 32px; background: #0f172a; min-height: calc(100vh - 160px);}
+
+/* ── STAT CARDS ── */
+.stat-grid {display: grid; grid-template-columns: repeat(6, 1fr); gap: 14px; margin-bottom: 24px;}
+.stat-card {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  padding: 16px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.stat-card:hover {border-color: #22d3ee;}
+.stat-label {color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 6px;}
+.stat-value {font-size: 28px; font-weight: 700; color: #e2e8f0; line-height: 1;}
+.stat-sub {color: #64748b; font-size: 11px; margin-top: 4px;}
+.stat-blue {color: #60a5fa;}
+.stat-orange {color: #fb923c;}
+.stat-green {color: #4ade80;}
+.stat-purple {color: #a78bfa;}
+.stat-teal {color: #22d3ee;}
+
+/* ── TWO-COL LAYOUT ── */
+.two-col {display: grid; grid-template-columns: 1fr 1fr; gap: 20px;}
+.three-col {display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px;}
+
+/* ── SECTION CARD ── */
+.section-card {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+.section-title {color: #e2e8f0; font-size: 15px; font-weight: 600; margin-bottom: 14px;}
+
+/* ── DATA TABLE ── */
+.data-table {width: 100%; border-collapse: collapse;}
+.data-table th {
+  color: #94a3b8; font-size: 11px; text-transform: uppercase;
+  padding: 8px 10px; border-bottom: 1px solid #334155; text-align: left;
+}
+.data-table td {
+  color: #e2e8f0; font-size: 13px;
+  padding: 10px 10px; border-bottom: 1px solid #1e293b; cursor: pointer;
+}
+.data-table tr:hover td {background: #334155;}
+.gain-pos {color: #4ade80; font-weight: 600;}
+.gain-neg {color: #f87171; font-weight: 600;}
+.pval {color: #94a3b8; font-size: 11px;}
+
+/* ── PROGRESS BAR ── */
+.prog-wrap {display: flex; align-items: center; gap: 10px; margin: 6px 0;}
+.prog-label {color: #94a3b8; font-size: 12px; width: 320px; flex-shrink: 0;}
+.prog-bar-bg {flex: 1; background: #334155; border-radius: 4px; height: 8px; cursor: pointer;}
+.prog-bar-fill {border-radius: 4px; height: 8px;}
+.prog-pct {color: #e2e8f0; font-size: 12px; width: 50px; text-align: right;}
+
+/* ── BIG CIRCLE ── */
+.circle-wrap {display: flex; flex-direction: column; align-items: center; gap: 8px; cursor: pointer;}
+.circle-ring {
+  width: 90px; height: 90px; border-radius: 50%; display: flex;
+  align-items: center; justify-content: center; flex-direction: column;
+  border: 5px solid;
+}
+.circle-val {font-size: 22px; font-weight: 700; line-height: 1;}
+.circle-lbl {font-size: 10px; color: #94a3b8; text-align: center; max-width: 90px;}
+
+/* ── MODAL OVERLAY ── */
+.modal-overlay {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(0,0,0,0.75); z-index: 9999;
+  display: flex; align-items: center; justify-content: center;
+}
+.modal-card {
+  background: #1e293b; border: 1px solid #334155; border-radius: 12px;
+  width: 640px; max-height: 80vh; overflow-y: auto; padding: 28px;
+  position: relative;
+}
+.modal-title {color: #22d3ee; font-size: 16px; font-weight: 700; margin-bottom: 16px;}
+.modal-section {margin-bottom: 14px;}
+.modal-section-label {
+  color: #64748b; font-size: 10px; text-transform: uppercase;
+  letter-spacing: 1px; margin-bottom: 4px;
+}
+.modal-section-value {color: #e2e8f0; font-size: 13px; line-height: 1.5;}
+.modal-table {width: 100%; border-collapse: collapse; margin-top: 10px;}
+.modal-table th {
+  color: #94a3b8; font-size: 11px; padding: 6px 10px;
+  border-bottom: 1px solid #334155; text-align: left;
+}
+.modal-table td {color: #e2e8f0; font-size: 12px; padding: 8px 10px; border-bottom: 1px solid #1e293b;}
+.src-ex {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: #7c3aed22; border: 1px solid #7c3aed; color: #a78bfa;
+  padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;
+}
+.src-nx {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: #16a34a22; border: 1px solid #16a34a; color: #4ade80;
+  padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;
+}
+.src-cb {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: #1d4ed822; border: 1px solid #1d4ed8; color: #60a5fa;
+  padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700;
+}
+
+/* ── KEY FINDINGS CIRCLES ── */
+.kf-circle {
+  width: 140px; height: 140px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  flex-direction: column; cursor: pointer; border: 6px solid;
+  margin: 0 auto 10px;
+}
+.kf-val {font-size: 36px; font-weight: 800; line-height: 1;}
+.kf-lbl {font-size: 11px; text-align: center; margin-top: 2px; padding: 0 8px;}
+.kf-increase {color: #4ade80; font-size: 13px; font-weight: 700; text-align: center;}
+
+/* ── UPLOAD ZONE ── */
+.upload-zone {
+  background: #1e293b; border: 2px dashed #334155; border-radius: 12px;
+  padding: 40px; text-align: center; cursor: pointer;
+  transition: border-color 0.15s;
+}
+.upload-zone:hover {border-color: #22d3ee;}
+.upload-icon {font-size: 40px; margin-bottom: 12px;}
+.upload-title {color: #e2e8f0; font-size: 16px; font-weight: 600; margin-bottom: 6px;}
+.upload-sub {color: #64748b; font-size: 13px;}
+
+/* ── JCEHP ── */
+.checklist-bar {
+  background: #334155; border-radius: 6px; height: 10px;
+  margin-bottom: 16px; overflow: hidden;
+}
+.checklist-fill {background: #22d3ee; height: 100%; border-radius: 6px;}
+.jcehp-section {
+  background: #1e293b; border: 1px solid #334155; border-radius: 8px;
+  padding: 16px; margin-bottom: 12px;
+}
+.jcehp-section-title {color: #a78bfa; font-size: 13px; font-weight: 700; margin-bottom: 8px;}
+.jcehp-content {color: #cbd5e1; font-size: 13px; line-height: 1.6; white-space: pre-wrap;}
+
+/* ── KIRKPATRICK ── */
+.kirk-level {
+  background: #1e293b; border-left: 4px solid;
+  border-radius: 0 8px 8px 0; padding: 16px; margin-bottom: 12px;
+}
+.kirk-level-title {font-size: 13px; font-weight: 700; margin-bottom: 10px;}
+
+/* ── AI INSIGHTS ── */
+.insight-card {
+  background: #1e293b; border: 1px solid #334155; border-radius: 10px;
+  padding: 18px; margin-bottom: 12px;
+}
+.insight-header {display: flex; align-items: center; gap: 10px; margin-bottom: 8px;}
+.insight-badge {
+  padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .5px;
+}
+.insight-title {color: #e2e8f0; font-size: 14px; font-weight: 600;}
+.insight-body {color: #94a3b8; font-size: 13px; line-height: 1.5;}
+.insight-rec {color: #4ade80; font-size: 12px; margin-top: 8px;}
+
+/* ── GENERAL ── */
+body, .stApp {background: #0a0f1e !important;}
+h1, h2, h3, p, label {color: #e2e8f0 !important;}
+.stTextInput input, .stSelectbox select {
+  background: #1e293b !important;
+  border-color: #334155 !important;
+  color: #e2e8f0 !important;
+}
+.stButton button {
+  background: #1e293b !important;
+  border: 1px solid #334155 !important;
+  color: #e2e8f0 !important;
+  border-radius: 6px !important;
+}
+.stButton button:hover {background: #334155 !important;}
+.stFileUploader {background: #1e293b; border-radius: 10px; padding: 10px;}
+div[data-testid="stFileUploadDropzone"] {background: #0f172a !important; border-color: #334155 !important;}
+</style>
+""", unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SESSION STATE
+# ══════════════════════════════════════════════════════════════════════════════
+def _init():
+    defaults = {
+        'tab': 'Overview',
+        'prog_name': '',
+        'proj_code': '',
+        'ex_records': [],
+        'nx_records': [],
+        'all_records': [],
+        'vendor_filter': 'All',
+        'specialty_filter': 'All',
+        'modal': None,
+        'api_key': '',
+        'ai_insights': [],
+        'jcehp_text': {},
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+_init()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PARSE EXCHANGE (single-sheet: META | EVAL | PRE | POST in columns)
+# ══════════════════════════════════════════════════════════════════════════════
 def parse_exchange(file_bytes):
-    """
-    Exchange format:
-      Row 0: section banner (PRE / POST / EVALUATION in merged cells)
-      Row 1: sub-header (sometimes blank)
-      Row 2: column labels (actual question text)
-      Row 3+: data
-    Returns list of dicts, each with keys  META_* / PRE_* / POST_* / EVAL_*
-    """
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
     ws = wb.active
     all_rows = list(ws.iter_rows(values_only=True))
     wb.close()
-
-    if len(all_rows) < 4:
+    if len(all_rows) < 3:
         return []
 
-    r0 = all_rows[0]   # section banners
-    r1 = all_rows[1]   # sub-headers
-    r2 = all_rows[2]   # column labels
+    r1 = all_rows[1]   # section row: 'EVALUATION', 'PRE', 'POST'
+    r2 = all_rows[2]   # column label row
 
-    # ── Find section boundaries from row 0 ──
-    pre_start = post_start = eval_start = None
-    for i, v in enumerate(r0):
+    # Find section start columns
+    eval_s = pre_s = post_s = None
+    for i, v in enumerate(r1):
         sv = str(v).strip().upper() if v else ''
-        if sv == 'PRE'  and pre_start  is None: pre_start  = i
-        if sv == 'POST' and post_start is None: post_start = i
-        if sv in ('EVALUATION', 'EVAL') and eval_start is None: eval_start = i
+        if sv == 'EVALUATION' and eval_s is None: eval_s = i
+        if sv == 'PRE' and pre_s is None:         pre_s  = i
+        if sv == 'POST' and post_s is None:        post_s = i
 
-    # Fallback: scan row 1 for section markers
-    if pre_start is None:
-        for i, v in enumerate(r1):
-            sv = str(v).strip().upper() if v else ''
-            if sv == 'PRE'  and pre_start  is None: pre_start  = i
-            if sv == 'POST' and post_start is None: post_start = i
-            if sv in ('EVALUATION', 'EVAL') and eval_start is None: eval_start = i
+    if pre_s is None:
+        return []
 
-    # Hard fallbacks
-    if pre_start  is None: pre_start  = 12
-    if post_start is None: post_start = pre_start + 8
-    if eval_start is None: eval_start = post_start + 8
+    total_cols = len(r2)
 
-    # ── Build column map ──
-    # Sort section boundaries so we assign correctly regardless of column order
-    # Build a list of (start_col, section) sorted by position
-    section_boundaries = []
-    if pre_start  is not None: section_boundaries.append((pre_start,  'pre'))
-    if post_start is not None: section_boundaries.append((post_start, 'post'))
-    if eval_start is not None: section_boundaries.append((eval_start, 'eval'))
-    section_boundaries.sort(key=lambda x: x[0])
+    def section_of(i):
+        # Check in reverse so POST wins over PRE over EVAL
+        if post_s is not None and i >= post_s: return 'POST'
+        if pre_s  is not None and i >= pre_s:  return 'PRE'
+        if eval_s is not None and i >= eval_s: return 'EVAL'
+        return 'META'
 
-    def get_section(col_idx):
-        sec = 'meta'
-        for start, name in section_boundaries:
-            if col_idx >= start:
-                sec = name
-        return sec
+    # Build column map
+    col_map = []  # list of (section, label)
+    for i, v in enumerate(r2):
+        lbl = str(v).strip() if v and str(v).strip() not in ['', '\xa0'] else None
+        col_map.append((section_of(i), lbl))
 
-    cols = []
-    n = max(len(r0), len(r2))
-    for i in range(n):
-        meta_hdr = str(r0[i]).strip() if i < len(r0) and r0[i] else ''
-        col_lbl  = str(r2[i]).strip() if i < len(r2) and r2[i] else ''
-        header   = col_lbl if col_lbl and col_lbl not in ('\xa0', 'Questions/Answers') else (
-                   meta_hdr if meta_hdr and meta_hdr not in ('\xa0',) else None)
-        if not header:
-            continue
-
-        sec = get_section(i)
-        cols.append({'header': header, 'section': sec, 'idx': i})
-
-    # ── Build records ──
     records = []
     for row in all_rows[3:]:
-        if not any(row):
-            continue
-        rec = {
-            '_source':      'Exchange',
-            '_has_post':    False,
-            '_has_eval':    False,
-            '_has_followup': False,
-        }
-        for col in cols:
-            i = col['idx']
-            val = row[i] if i < len(row) else None
-            if val == '\xa0': val = None
-            sec = col['section']
-            key = f"{sec.upper()}_{col['header']}"
+        rec = {'_source': 'Exchange'}
+        for i, val in enumerate(row):
+            if i >= len(col_map): break
+            sec, lbl = col_map[i]
+            if lbl is None: continue
+            key = f"{sec}__{lbl}"
+            # Handle specialty specifically for META
+            if sec == 'META':
+                key = f"META__{lbl}"
             rec[key] = val
-            if sec == 'post' and val is not None: rec['_has_post'] = True
-            if sec == 'eval' and val is not None: rec['_has_eval'] = True
         records.append(rec)
 
     return records
 
-
 # ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 2 — NEXUS PARSER
+# PARSE NEXUS (multi-sheet: PreNon, Pre, Post, Eval, Follow-Up)
 # ══════════════════════════════════════════════════════════════════════════════
-
-def _nexus_sheet_to_dicts(ws):
-    if ws is None:
-        return []
-    rows = list(ws.iter_rows(values_only=True))
-    if not rows:
-        return []
-    headers = [str(h).strip() if h else '' for h in rows[0]]
-    result = []
-    for row in rows[1:]:
-        if not any(row):
-            continue
-        rec = {}
-        for h, v in zip(headers, row):
-            if h:
-                rec[h] = v if v != '\xa0' else None
-        result.append(rec)
-    return result
-
-
-def _nexus_find_key(rows, *keyword_groups):
-    """Find the first column key that contains ALL keywords in any group."""
-    if not rows:
-        return None
-    for group in keyword_groups:
-        for k in rows[0]:
-            kl = k.lower()
-            if all(w.lower() in kl for w in group):
-                return k
-    return None
-
-
 def parse_nexus(file_bytes):
-    """
-    Nexus multi-sheet format:
-      PreNon — pre-only respondents (no post)
-      Pre    — matched pre rows
-      Post   — matched post rows  (same respondents as Pre, same order)
-      Eval   — evaluation rows
-      Follow Up — follow-up rows
-    Returns list of dicts with keys META_* / PRE_* / POST_* / EVAL_* / FOLLOWUP_*
-    """
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    sheets = {s.upper(): s for s in wb.sheetnames}
 
-    def sheet(*names):
-        for name in names:
-            for s in wb.sheetnames:
-                if s.strip().lower() == name.lower():
-                    return _nexus_sheet_to_dicts(wb[s])
-        return []
+    def read_sheet(key_variants):
+        for k in key_variants:
+            if k.upper() in sheets:
+                ws = wb[sheets[k.upper()]]
+                rows = list(ws.iter_rows(values_only=True))
+                if not rows: return {}, []
+                headers = [str(h).strip() if h else None for h in rows[0]]
+                return {h: i for i, h in enumerate(headers) if h}, rows[1:]
+        return {}, []
 
-    pre_non  = sheet('PreNon')
-    pre_rows = sheet('Pre')
-    post_rows= sheet('Post')
-    eval_rows= sheet('Eval')
-    fu_rows  = sheet('Follow Up', 'Follow-Up', 'FollowUp')
+    pre_idx,    pre_rows    = read_sheet(['Pre'])
+    prenon_idx, prenon_rows = read_sheet(['PreNon'])
+    post_idx,   post_rows   = read_sheet(['Post'])
+    eval_idx,   eval_rows   = read_sheet(['Eval'])
+    fu_idx,     fu_rows     = read_sheet(['Follow-Up', 'Follow Up'])
     wb.close()
 
-    # ── Join key: try email first, then token/ID ──
-    def find_join_key(rows_a, rows_b):
-        """Find a key present in both row sets that can be used to join them."""
-        if not rows_a or not rows_b:
-            return None, None
-        keys_a = set(rows_a[0].keys())
-        keys_b = set(rows_b[0].keys())
-        # Try candidates in priority order
-        for candidate in ['Email', 'email', 'Token', 'token', 'ID', 'Id', 'id']:
-            if candidate in keys_a and candidate in keys_b:
-                # Verify there's actual overlap in values
-                vals_a = {str(r.get(candidate,'') or '').strip().lower() for r in rows_a if r.get(candidate)}
-                vals_b = {str(r.get(candidate,'') or '').strip().lower() for r in rows_b if r.get(candidate)}
-                if vals_a & vals_b:
-                    return candidate, candidate
-        # Try partial key name matching
-        for ka in keys_a:
-            for kb in keys_b:
-                if ka.lower() == kb.lower():
-                    vals_a = {str(r.get(ka,'') or '').strip().lower() for r in rows_a if r.get(ka)}
-                    vals_b = {str(r.get(kb,'') or '').strip().lower() for r in rows_b if r.get(kb)}
-                    if vals_a & vals_b:
-                        return ka, kb
-        return None, None
+    # Index post/eval/fu by ID
+    def index_by_id(idx, rows):
+        d = {}
+        if 'ID' not in idx: return d
+        id_col = idx['ID']
+        for r in rows:
+            rid = str(r[id_col]).strip() if r[id_col] is not None else None
+            if rid: d[rid] = r
+        return d
 
-    # Join key: try email, token, or ID
-    email_key = (_nexus_find_key(pre_rows, ['email']) or
-                 _nexus_find_key(pre_non,  ['email']) or
-                 _nexus_find_key(pre_rows, ['token']) or
-                 _nexus_find_key(pre_non,  ['token']) or
-                 _nexus_find_key(pre_rows, ['id']) or
-                 _nexus_find_key(pre_non,  ['id']))
+    post_by_id = index_by_id(post_idx, post_rows)
+    eval_by_id = index_by_id(eval_idx, eval_rows)
+    fu_by_id   = index_by_id(fu_idx,   fu_rows)
 
-    # ── Build email/token→eval map ──
-    eval_map = {}
-    eval_positional = []  # always build positional fallback
-    if eval_rows:
-        pre_src = pre_rows or pre_non
-        join_pre, join_ev = find_join_key(pre_src, eval_rows)
-        if join_ev:
-            # Verify the join actually works (IDs overlap)
-            pre_vals = {str(r.get(join_pre, '') or '').strip().lower() for r in pre_src if r.get(join_pre)}
-            ev_vals  = {str(r.get(join_ev,  '') or '').strip().lower() for r in eval_rows  if r.get(join_ev)}
-            overlap  = pre_vals & ev_vals
-            if overlap:  # join by key only if there's actual overlap
-                for r in eval_rows:
-                    e = str(r.get(join_ev, '') or '').strip().lower()
-                    if e:
-                        eval_map[e] = r
-        # Always build positional index as fallback
-        eval_positional = eval_rows
+    def make_record(pre_row, pre_idx_map, is_prenon=False):
+        rec = {'_source': 'Nexus'}
+        id_col = pre_idx_map.get('ID')
+        rid = str(pre_row[id_col]).strip() if id_col is not None and pre_row[id_col] is not None else None
+        rec['_id'] = rid
 
-    # ── Build email/token→fu map ──
-    fu_map = {}
-    if fu_rows:
-        pre_src = pre_rows or pre_non
-        join_pre, join_fu = find_join_key(pre_src, fu_rows)
-        if join_fu:
-            for r in fu_rows:
-                e = str(r.get(join_fu, '') or '').strip().lower()
-                if e:
-                    fu_map[e] = r
+        # PRE columns
+        for h, ci in pre_idx_map.items():
+            if h == 'ID': continue
+            val = pre_row[ci] if ci < len(pre_row) else None
+            rec[f'PRE__{h}'] = val
 
-    # Helper to prefix keys — strips long Nexus question prefixes
-    NEXUS_STRIP_PREFIXES = [
-        'Please indicate the extent of your agreement with the following statements:>> ',
-        'Please indicate the extent of your agreement with the following statements: ',
-        'Upon completion of this activity, participants will be able to:>> ',
-        'Upon completion of this activity, participants will be able to: ',
-    ]
-    def clean_key(k):
-        """Strip verbose Nexus prefixes from column names so they merge with Exchange."""
-        for pfx in NEXUS_STRIP_PREFIXES:
-            if k.startswith(pfx):
-                return k[len(pfx):]
-            # Case-insensitive check
-            if k.lower().startswith(pfx.lower()):
-                return k[len(pfx):]
-        return k
+        # POST
+        if rid and rid in post_by_id:
+            post_row = post_by_id[rid]
+            for h, ci in post_idx.items():
+                if h == 'ID': continue
+                val = post_row[ci] if ci < len(post_row) else None
+                rec[f'POST__{h}'] = val
 
-    def prefixed(row_dict, prefix, exclude_keys=None):
-        out = {}
-        for k, v in row_dict.items():
-            if exclude_keys and k in exclude_keys:
-                continue
-            cleaned = clean_key(k)
-            out[f"{prefix}_{cleaned}"] = v
-        return out
+        # EVAL
+        if rid and rid in eval_by_id:
+            ev_row = eval_by_id[rid]
+            for h, ci in eval_idx.items():
+                if h == 'ID': continue
+                val = ev_row[ci] if ci < len(ev_row) else None
+                rec[f'EVAL__{h}'] = val
+
+        # Follow-Up
+        if rid and rid in fu_by_id:
+            fu_row = fu_by_id[rid]
+            for h, ci in fu_idx.items():
+                if h == 'ID': continue
+                val = fu_row[ci] if ci < len(fu_row) else None
+                rec[f'FU__{h}'] = val
+
+        rec['_is_prenon'] = is_prenon
+        rec['_has_post']  = rid in post_by_id if rid else False
+        rec['_has_eval']  = rid in eval_by_id if rid else False
+        return rec
 
     records = []
-
-    def get_join_val(row, key):
-        if not key: return ''
-        return str(row.get(key, '') or '').strip().lower()
-
-    # ── Pre-only respondents (no post) ──
-    for idx, pre in enumerate(pre_non):
-        jval = get_join_val(pre, email_key)
-        rec = {
-            '_source':      'Nexus',
-            '_has_post':    False,
-            '_has_eval':    False,
-            '_has_followup': False,
-        }
-        rec.update(prefixed(pre, 'META'))
-        # Try join by value, then by position fallback
-        ev = eval_map.get(jval)
-        if ev is None and eval_positional and idx < len(eval_positional):
-            ev = eval_positional[idx]
-        if ev:
-            rec.update(prefixed(ev, 'EVAL'))
-            rec['_has_eval'] = True
-        fu = fu_map.get(jval)
-        if fu:
-            rec.update(prefixed(fu, 'FOLLOWUP'))
-            rec['_has_followup'] = True
-        records.append(rec)
-
-    # ── Matched pre/post respondents ──
-    for i, pre in enumerate(pre_rows):
-        jval = get_join_val(pre, email_key)
-        post  = post_rows[i] if i < len(post_rows) else {}
-        rec = {
-            '_source':      'Nexus',
-            '_has_post':    bool(post),
-            '_has_eval':    False,
-            '_has_followup': False,
-        }
-        rec.update(prefixed(pre, 'META'))
-        if post:
-            rec.update(prefixed(post, 'POST'))
-        # Try join by value, then by position fallback (offset by pre_non count)
-        ev = eval_map.get(jval)
-        if ev is None and eval_positional:
-            pos = len(pre_non) + i
-            if pos < len(eval_positional):
-                ev = eval_positional[pos]
-        if ev:
-            rec.update(prefixed(ev, 'EVAL'))
-            rec['_has_eval'] = True
-        fu = fu_map.get(jval)
-        if fu:
-            rec.update(prefixed(fu, 'FOLLOWUP'))
-            rec['_has_followup'] = True
-        records.append(rec)
-
-    # ── Follow-up-only rows not already captured ──
-    matched_emails = set()
-    if email_key:
-        for r in pre_rows + pre_non:
-            e = str(r.get(email_key, '') or '').strip().lower()
-            if e:
-                matched_emails.add(e)
-    for fu in fu_rows:
-        ek = _nexus_find_key(fu_rows, ['email'])
-        e  = str(fu.get(ek, '') or '').strip().lower() if ek else ''
-        if e and e in matched_emails:
-            continue
-        rec = {
-            '_source':      'Nexus',
-            '_has_post':    False,
-            '_has_eval':    False,
-            '_has_followup': True,
-        }
-        rec.update(prefixed(fu, 'FOLLOWUP'))
-        records.append(rec)
+    for row in prenon_rows:
+        records.append(make_record(row, prenon_idx, is_prenon=True))
+    for row in pre_rows:
+        records.append(make_record(row, pre_idx, is_prenon=False))
 
     return records
 
-
 # ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 3 — COMBINED EXCEL WRITER  (with MCQ dedup fix)
+# COMBINE INTO DATAFRAME
 # ══════════════════════════════════════════════════════════════════════════════
-
-SECTION_ORDER = ['meta', 'pre', 'post', 'eval', 'followup']
-
-SECTION_FILLS = {
-    'meta':     PatternFill('solid', fgColor='2D3142'),
-    'pre':      PatternFill('solid', fgColor='1A3A5C'),
-    'post':     PatternFill('solid', fgColor='1A4A2E'),
-    'eval':     PatternFill('solid', fgColor='3D1A5C'),
-    'followup': PatternFill('solid', fgColor='5C3A1A'),
-}
-SOURCE_FILLS = {
-    'Exchange': PatternFill('solid', fgColor='1E1030'),
-    'Nexus':    PatternFill('solid', fgColor='0E2010'),
-    'Nexus_FU': PatternFill('solid', fgColor='2A1A0E'),
-}
-WHITE_FONT  = Font(color='FFFFFF', bold=True, size=9)
-BOLD_FONT   = Font(bold=True)
-NORMAL_FONT = Font(size=9)
-CENTER_ALIGN = Alignment(horizontal='center', vertical='center', wrap_text=True)
-LEFT_ALIGN   = Alignment(horizontal='left',   vertical='top',    wrap_text=True)
-
-
-def _section_of_key(key: str) -> str:
-    k = key.upper()
-    for sec in ('FOLLOWUP', 'EVAL', 'POST', 'PRE', 'META'):
-        if k.startswith(sec + '_'):
-            return sec.lower()
-    if key.startswith('_'):
-        return 'meta'
-    return 'meta'
-
-
-def _display_of_key(key: str) -> str:
-    """Strip the section prefix to get a human-readable column name."""
-    for sec in ('FOLLOWUP_', 'EVAL_', 'POST_', 'PRE_', 'META_'):
-        if key.upper().startswith(sec):
-            return key[len(sec):]
-    return key.lstrip('_')
-
-
-def write_combined_excel(ex_records, nx_records) -> bytes:
-    """
-    Build the combined Excel workbook and return as bytes.
-
-    MCQ DEDUP FIX:
-    When two columns have the same display name but come from different
-    sections (e.g. PRE and POST carry the same truncated MCQ question text),
-    we append   __PRE / __POST / __EVAL  to the output column header so that
-    every header in the sheet is unique.  The section suffix is also stored
-    as part of the column definition so the Analyzer can detect section by
-    suffix rather than by position.
-    """
+def combine_records(ex_records, nx_records):
     all_records = ex_records + nx_records
+    if not all_records:
+        return pd.DataFrame()
+    df = pd.DataFrame(all_records)
 
-    # ── Collect all keys in section order ──
-    seen_keys = set()
-    ordered_keys = []
-    # System keys first
-    for sk in ('_source', '_has_post', '_has_eval', '_has_followup'):
-        seen_keys.add(sk)
-        ordered_keys.append(sk)
+    # Detect which cols are MCQ (PRE__ and POST__ with matching question text)
+    # Build short-label map to deduplicate PRE/POST collision
+    pre_cols  = [c for c in df.columns if c.startswith('PRE__')]
+    post_cols = [c for c in df.columns if c.startswith('POST__')]
 
-    sec_buckets = defaultdict(list)
-    for rec in all_records:
-        for k in rec:
-            if k not in seen_keys:
-                seen_keys.add(k)
-                sec_buckets[_section_of_key(k)].append(k)
-
-    for sec in SECTION_ORDER:
-        for k in sec_buckets[sec]:
-            ordered_keys.append(k)
-
-    # ── Build display headers with dedup suffix ──
-    # display_name → list of (key, section)
-    display_count = defaultdict(list)
-    for k in ordered_keys:
-        if k.startswith('_'):
-            continue
-        disp = _display_of_key(k)
-        trunc = disp[:60]   # same truncation threshold used in pandas read
-        display_count[trunc].append(k)
-
-    # Keys whose display names collide across sections
-    collision_keys = set()
-    for trunc, keys in display_count.items():
-        if len(keys) > 1:
-            # Only flag if they come from different sections
-            secs = {_section_of_key(k) for k in keys}
-            if len(secs) > 1:
-                for k in keys:
-                    collision_keys.add(k)
-
-    def col_header(key):
-        if key.startswith('_'):
-            return key
-        disp = _display_of_key(key)
-        if key in collision_keys:
-            sec = _section_of_key(key).upper()
-            return f"{disp}__{sec}"
-        return disp
-
-    headers = [col_header(k) for k in ordered_keys]
-
-    # ── Write workbook ──
-    wb = openpyxl.Workbook()
-    ws_data    = wb.active
-    ws_data.title = 'Combined Data'
-    ws_summary = wb.create_sheet('Summary')
-    ws_colmap  = wb.create_sheet('Column Map')
-
-    # — Header row with section color bands —
-    for ci, (key, hdr) in enumerate(zip(ordered_keys, headers), start=1):
-        sec = _section_of_key(key)
-        cell = ws_data.cell(row=1, column=ci, value=hdr)
-        cell.fill  = SECTION_FILLS.get(sec, SECTION_FILLS['meta'])
-        cell.font  = WHITE_FONT
-        cell.alignment = CENTER_ALIGN
-        ws_data.column_dimensions[get_column_letter(ci)].width = max(12, min(40, len(hdr) * 0.8 + 4))
-
-    ws_data.row_dimensions[1].height = 40
-    ws_data.freeze_panes = 'A2'
-
-    # — Data rows —
-    for ri, rec in enumerate(all_records, start=2):
-        src = rec.get('_source', 'Nexus')
-        is_fu = rec.get('_has_followup') and not rec.get('_has_post') and not rec.get('_has_eval')
-        row_fill = SOURCE_FILLS.get('Nexus_FU' if is_fu else src, None)
-
-        for ci, key in enumerate(ordered_keys, start=1):
-            val = rec.get(key)
-            cell = ws_data.cell(row=ri, column=ci, value=val)
-            cell.font = NORMAL_FONT
-            if row_fill:
-                cell.fill = row_fill
-
-    # — Summary sheet —
-    ex_n  = len(ex_records)
-    nx_n  = sum(1 for r in nx_records if not r.get('_has_followup'))
-    fu_n  = sum(1 for r in nx_records if r.get('_has_followup') and
-                                          not r.get('_has_post') and
-                                          not r.get('_has_eval'))
-    total = len(all_records)
-
-    ws_summary['A1'] = 'Source';    ws_summary['A1'].font = BOLD_FONT
-    ws_summary['B1'] = 'Records';   ws_summary['B1'].font = BOLD_FONT
-    rows_s = [('Exchange', ex_n), ('Nexus (pre/post/eval)', nx_n),
-              ('Nexus (follow-up only)', fu_n), ('TOTAL', total)]
-    for i, (lbl, cnt) in enumerate(rows_s, start=2):
-        ws_summary.cell(row=i, column=1, value=lbl)
-        ws_summary.cell(row=i, column=2, value=cnt)
-
-    # — Column map sheet —
-    ws_colmap['A1'] = 'Column Header'; ws_colmap['A1'].font = BOLD_FONT
-    ws_colmap['B1'] = 'Section';       ws_colmap['B1'].font = BOLD_FONT
-    ws_colmap['C1'] = 'Original Key';  ws_colmap['C1'].font = BOLD_FONT
-    ws_colmap['D1'] = 'Deduped';       ws_colmap['D1'].font = BOLD_FONT
-    for i, (key, hdr) in enumerate(zip(ordered_keys, headers), start=2):
-        ws_colmap.cell(row=i, column=1, value=hdr)
-        ws_colmap.cell(row=i, column=2, value=_section_of_key(key))
-        ws_colmap.cell(row=i, column=3, value=key)
-        ws_colmap.cell(row=i, column=4, value='yes' if key in collision_keys else '')
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    return buf.getvalue()
-
+    # Build label fingerprint for deduplication display
+    # (columns already have unique full-text keys — no truncation issue)
+    return df
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 4 — ANALYZER: load combined Excel
+# CLASSIFY COLUMNS
 # ══════════════════════════════════════════════════════════════════════════════
+def classify_cols(df):
+    pre_cols  = sorted([c for c in df.columns if c.startswith('PRE__')])
+    post_cols = sorted([c for c in df.columns if c.startswith('POST__')])
+    eval_cols = sorted([c for c in df.columns if c.startswith('EVAL__')])
+    fu_cols   = sorted([c for c in df.columns if c.startswith('FU__')])
+    meta_cols = sorted([c for c in df.columns if c.startswith('META__')
+                        or c in ('_source','_id','_is_prenon','_has_post','_has_eval')])
+    return pre_cols, post_cols, eval_cols, fu_cols, meta_cols
 
-def load_combined(file_bytes):
-    """Load combined Excel. Returns (df, section_lookup dict col_header->section)."""
-    buf = io.BytesIO(file_bytes)
-    df = pd.read_excel(buf, sheet_name='Combined Data', header=0)
-    # Build section lookup from Column Map sheet
-    section_lookup = {}
-    try:
-        buf.seek(0)
-        df_map = pd.read_excel(buf, sheet_name='Column Map', header=0)
-        for _, row in df_map.iterrows():
-            hdr = str(row.iloc[0]).strip() if pd.notna(row.iloc[0]) else ''
-            sec = str(row.iloc[1]).strip() if pd.notna(row.iloc[1]) else ''
-            if hdr and sec:
-                section_lookup[hdr] = sec
-    except Exception:
-        pass
-    return df, section_lookup
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+def pct(n, d):
+    if not d: return None
+    return round(100 * n / d, 1)
 
+def short(s, n=55):
+    s = str(s)
+    return s[:n] + '…' if len(s) > n else s
 
-def classify_cols(df: pd.DataFrame, section_lookup: dict = None):
-    """
-    Classify columns into sections using Column Map lookup when available,
-    falling back to prefix/suffix heuristics.
-    """
-    pre_cols  = []
-    post_cols = []
-    eval_cols = []
-    meta_cols = []
+def strip_prefix(col):
+    return re.sub(r'^(PRE__|POST__|EVAL__|FU__|META__)', '', col)
 
-    for col in df.columns:
-        cu = col.upper()
+def is_mcq_col(series):
+    """Returns True if column looks like MCQ (text answers, high cardinality of text)."""
+    vals = series.dropna().astype(str)
+    if len(vals) < 5: return False
+    # If most values are long text (>10 chars) and there are few unique — MCQ answer choices
+    avg_len = vals.str.len().mean()
+    n_unique = vals.nunique()
+    if avg_len > 8 and n_unique <= 20: return True
+    return False
 
-        # 1. Dedup suffix (MCQ fix)
-        if cu.endswith('__PRE'):
-            pre_cols.append(col); continue
-        if cu.endswith('__POST'):
-            post_cols.append(col); continue
-        if cu.endswith('__EVAL'):
-            eval_cols.append(col); continue
+def is_likert_col(series):
+    """Returns True if column has Likert-like scale values."""
+    vals = series.dropna()
+    if len(vals) < 5: return False
+    str_vals = vals.astype(str)
+    likert_patterns = [
+        r'^(Not at all|Slightly|Moderately|Very|Extremely)',
+        r'^(Strongly (agree|disagree)|Agree|Disagree|Neutral)',
+        r'^(Not at all|Not very|Somewhat|Very|Extremely)',
+        r'^(1|2|3|4|5)$',
+        r'^(Poor|Fair|Good|Very Good|Excellent)',
+        r'^(Never|Rarely|Sometimes|Often|Always)',
+        r'^(Not at all familiar|Not very familiar|Neutral|Somewhat familiar|Very familiar)',
+        r'^(Not at all confident|Not very confident|Neutral|Somewhat confident|Very confident)',
+    ]
+    for pat in likert_patterns:
+        if str_vals.str.match(pat, case=False, na=False).mean() > 0.3:
+            return True
+    return False
 
-        # 2. Column Map lookup (most reliable)
-        if section_lookup:
-            sec = section_lookup.get(col, '')
-            if sec == 'pre':      pre_cols.append(col);  continue
-            if sec == 'post':     post_cols.append(col); continue
-            if sec == 'eval':     eval_cols.append(col); continue
-            if sec == 'followup': eval_cols.append(col); continue
-            if sec == 'meta':     meta_cols.append(col); continue
-
-        # 3. Prefix heuristic fallback
-        if cu.startswith('PRE_'):      pre_cols.append(col)
-        elif cu.startswith('POST_'):   post_cols.append(col)
-        elif cu.startswith('EVAL_'):   eval_cols.append(col)
-        elif cu.startswith('FOLLOWUP_'): eval_cols.append(col)
-        else:                          meta_cols.append(col)
-
-    return pre_cols, post_cols, eval_cols, meta_cols
-
-
-# ── Likert scorer ──
 LIKERT_MAP = {
-    "not at all familiar": 1, "not very familiar": 2, "neutral": 3,
-    "somewhat familiar": 4, "very familiar": 5,
-    "not at all confident": 1, "not very confident": 2,
-    "somewhat confident": 3, "very confident": 4,
-    "never": 1, "25% of the time": 2, "50% of the time": 3,
-    "75% of the time": 4, "100% of the time": 5,
-    "strongly disagree": 1, "disagree": 2, "agree": 4, "strongly agree": 5,
-    "not at all": 1, "slightly": 2, "somewhat": 3, "very": 4, "extremely": 5,
-    "1": 1, "2": 2, "3": 3, "4": 4, "5": 5,
+    # 5-point familiarity/confidence
+    'not at all familiar': 1, 'not very familiar': 2, 'neutral': 3,
+    'somewhat familiar': 4, 'very familiar': 5,
+    'not at all confident': 1, 'not very confident': 2,
+    'somewhat confident': 4, 'very confident': 5,
+    # Generic 5-point
+    'not at all': 1, 'slightly': 2, 'moderately': 3, 'very': 4, 'extremely': 5,
+    'strongly disagree': 1, 'disagree': 2, 'agree': 4, 'strongly agree': 5,
+    'poor': 1, 'fair': 2, 'good': 3, 'very good': 4, 'excellent': 5,
+    'never': 1, 'rarely': 2, 'sometimes': 3, 'often': 4, 'always': 5,
+    # Satisfaction specific
+    'very poor': 1, 'below average': 2, 'average': 3, 'above average': 4,
+    # Numeric strings
+    '1': 1, '2': 2, '3': 3, '4': 4, '5': 5,
 }
 
 def to_likert(val):
-    if val is None or (isinstance(val, float) and math.isnan(val)):
+    if val is None: return None
+    if isinstance(val, (int, float)):
+        v = float(val)
+        if 1 <= v <= 5: return v
         return None
     s = str(val).strip().lower()
-    if s in LIKERT_MAP:
-        return LIKERT_MAP[s]
-    try:
-        f = float(s)
-        if 1.0 <= f <= 5.0:
-            return f
-    except (ValueError, TypeError):
-        pass
-    return None
+    return LIKERT_MAP.get(s)
 
+# ══════════════════════════════════════════════════════════════════════════════
+# MATCH PRE / POST QUESTION PAIRS
+# ══════════════════════════════════════════════════════════════════════════════
+def norm_q(s):
+    """Normalize question text: strip HTML/entities/non-ASCII, first 9 words."""
+    s = re.sub(r'<[^>]+>', ' ', s)
+    s = re.sub(r'&[a-zA-Z0-9#]+;', ' ', s)
+    s = s.encode('ascii', 'ignore').decode('ascii')
+    s = re.sub(r'[^a-zA-Z0-9\s]', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip().lower()
+    return ' '.join(s.split()[:9])
 
-def is_mcq_col(col_name, series):
-    """Heuristic: column looks like a multiple-choice question answer."""
-    cn = col_name.lower()
-    # Skip obvious non-MCQ columns
-    skip_patterns = [
-        'email', 'name', 'zip', 'credential', 'specialty', 'practice',
-        'source', 'activity', 'certificate', 'date', 'time',
-        'satisfied', 'satisfaction', 'recommend', 'bias', 'new',
-        'commercial', 'faculty', 'objectives', 'barrier', 'change',
-        'intend', 'will you', 'are you', 'aware', 'important',
-        'confident', 'familiar', 'agree', 'disagree',
-    ]
-    for pat in skip_patterns:
-        if pat in cn:
-            return False
-    # Must have question-like text (>20 chars) — strip HTML tags for length check
-    clean_name = re.sub(r'<[^>]+>', '', col_name)
-    if len(clean_name) < 20:
-        return False
-    # Values should be mostly text answers (not numbers, not pure Likert)
-    non_null = series.dropna()
-    if len(non_null) == 0:
-        return False
-    likert_count = sum(1 for v in non_null if to_likert(v) is not None)
-    if likert_count / len(non_null) > 0.8:
-        return False
-    return True
+def norm_answer(v):
+    """Normalize a single answer string for comparison."""
+    if v is None: return ''
+    s = str(v).strip()
+    s = re.sub(r'<[^>]+>', ' ', s)
+    s = s.encode('ascii', 'ignore').decode('ascii')
+    s = re.sub(r'[^a-zA-Z0-9\s]', ' ', s)
+    return re.sub(r'\s+', ' ', s).strip().lower()[:40]
 
+def answer_fingerprint(series):
+    """Return frozenset of normalized top answer values (top 5 by frequency)."""
+    vals = series.dropna().astype(str)
+    if len(vals) == 0: return frozenset()
+    top = vals.value_counts().head(5).index.tolist()
+    return frozenset(norm_answer(v) for v in top if norm_answer(v))
 
-CORRECT_ANSWERS = {
-    # LAI PrEP program answers — extend as needed
-    "shared decision": "Ask the patient what factors matter most to them.",
-    "jordan": "Syphilis, gonorrhea, and chlamydia screening",
-    "cab lai": "CAB LAI requires cold-chain storage",
-    "post-discontinuation": "HIV-1 RNA assay every 3 months for 12 months",
-}
+def answer_overlap(fp_a, fp_b):
+    """Overlap ratio between two answer fingerprints."""
+    if not fp_a or not fp_b: return 0.0
+    return len(fp_a & fp_b) / max(len(fp_a), len(fp_b))
 
-def get_correct_answer(col_name):
-    cn = col_name.lower()
-    for kw, ans in CORRECT_ANSWERS.items():
-        if kw in cn:
-            return ans
-    return None
+def match_pre_post(df, pre_cols, post_cols):
+    """
+    Match pre/post column groups using answer-set overlap as primary signal.
 
+    Returns list of dicts, each representing ONE semantic question:
+        {
+          'pre_cols':  [list of all matching PRE columns (may be Ex + Nx versions)],
+          'post_cols': [list of all matching POST columns],
+          'label':     best question label (longest / most complete),
+        }
+    This allows computing combined stats across both vendors even when
+    Exchange and Nexus encode the same question with slightly different text.
+    """
+    # Pre-compute answer fingerprints
+    pre_fps  = {c: answer_fingerprint(df[c]) for c in pre_cols}
+    post_fps = {c: answer_fingerprint(df[c]) for c in post_cols}
 
-def pct_correct(series, correct_answer):
-    if correct_answer is None:
+    # Score all pre/post combinations
+    scored = []
+    for pc in pre_cols:
+        for qc in post_cols:
+            a_sc = answer_overlap(pre_fps[pc], post_fps[qc])
+            pq = norm_q(pc); qq = norm_q(qc)
+            pw = set(pq.split()); qw = set(qq.split())
+            q_sc = len(pw & qw) / max(len(pw), len(qw)) if pw and qw else 0
+            combined = a_sc * 0.7 + q_sc * 0.3
+            if combined >= 0.45:
+                scored.append((combined, pc, qc))
+
+    scored.sort(key=lambda x: -x[0])
+
+    # Cluster into semantic groups
+    # Each group: all (pre_col, post_col) pairs that share answer fingerprints
+    groups = []   # list of {'pre_cols': set, 'post_cols': set, 'fp': answer_fp}
+
+    def find_group(pc, qc):
+        """Find existing group that matches this pair's answer fingerprint."""
+        pc_fp = pre_fps[pc]
+        qc_fp = post_fps[qc]
+        for g in groups:
+            # Check overlap with any existing member
+            g_pre_fp  = next(iter(g['pre_fps']))
+            g_post_fp = next(iter(g['post_fps']))
+            if answer_overlap(pc_fp, g_pre_fp) >= 0.65 and answer_overlap(qc_fp, g_post_fp) >= 0.65:
+                return g
         return None
-    non_null = series.dropna()
-    if len(non_null) == 0:
-        return None
-    n_correct = sum(1 for v in non_null
-                    if str(v).strip().lower() == correct_answer.strip().lower())
-    return round(100 * n_correct / len(non_null), 1), len(non_null)
 
+    for score, pc, qc in scored:
+        g = find_group(pc, qc)
+        if g is None:
+            groups.append({
+                'pre_cols':  {pc},
+                'post_cols': {qc},
+                'pre_fps':   {pre_fps[pc]},
+                'post_fps':  {post_fps[qc]},
+                'best_pre':  pc,   # longest label
+                'best_post': qc,
+            })
+        else:
+            g['pre_cols'].add(pc)
+            g['post_cols'].add(qc)
+            g['pre_fps'].add(pre_fps[pc])
+            g['post_fps'].add(post_fps[qc])
+            # Keep the label with the longer text as 'best'
+            if len(pc) > len(g['best_pre']): g['best_pre'] = pc
+            if len(qc) > len(g['best_post']): g['best_post'] = qc
 
-def chi_square_pvalue(pre_series, post_series, correct_answer):
-    if correct_answer is None:
-        return None
-    pre_c  = sum(1 for v in pre_series.dropna()
-                 if str(v).strip().lower() == correct_answer.strip().lower())
-    post_c = sum(1 for v in post_series.dropna()
-                 if str(v).strip().lower() == correct_answer.strip().lower())
-    pre_n  = len(pre_series.dropna())
-    post_n = len(post_series.dropna())
-    if pre_n == 0 or post_n == 0:
-        return None
-    contingency = [[pre_c,  pre_n  - pre_c],
-                   [post_c, post_n - post_c]]
-    try:
-        _, p, _, _ = stats.chi2_contingency(contingency)
-        return p
-    except Exception:
-        return None
+    # Convert to list of (pre_col_list, post_col_list) tuples
+    result = []
+    for g in groups:
+        result.append((sorted(g['pre_cols']), sorted(g['post_cols'])))
+
+    return result
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 5 — ANALYZER METRICS
+# COMPUTE KNOWLEDGE (MCQ)
 # ══════════════════════════════════════════════════════════════════════════════
-
-def find_col(df, *keywords, exclude=None):
-    """Return first column whose name contains ALL keywords (case-insensitive)."""
-    exclude = exclude or []
-    for col in df.columns:
-        cl = col.lower()
-        if all(kw.lower() in cl for kw in keywords):
-            if not any(ex.lower() in cl for ex in exclude):
-                return col
-    return None
-
-
-def pct_yes(series):
-    nn = series.dropna()
-    if len(nn) == 0:
-        return None, 0
-    yes_vals = {'yes', 'y', '1', 'true', 'strongly agree', 'agree', 'very', 'extremely'}
-    n_yes = sum(1 for v in nn if str(v).strip().lower() in yes_vals)
-    return round(100 * n_yes / len(nn), 1), len(nn)
-
-
-def pct_agree(series):
-    nn = series.dropna()
-    if len(nn) == 0:
-        return None, 0
-    agree_vals = {'agree', 'strongly agree', '4', '5', 'yes', 'y', 'true',
-                  'very', 'extremely', '1'}
-    n_agree = sum(1 for v in nn if str(v).strip().lower() in agree_vals)
-    return round(100 * n_agree / len(nn), 1), len(nn)
-
-
-def avg_pct_new(series):
-    vals = []
-    for v in series.dropna():
-        s = str(v).strip().rstrip('%')
-        try:
-            f = float(s)
-            # Nexus stores as decimal (0.0-1.0), Exchange as percentage (0-100)
-            # Distinguish: if ALL values in series are <=1.0 treat as decimals
-            # We do this per-value: if f <= 1.0 and not a round number like 25/50/75/100
-            if 0 <= f <= 1.0 and f not in (1.0,) or (f > 0 and f < 1):
-                vals.append(round(f * 100))
-            elif 0 <= f <= 100:
-                vals.append(f)
-        except ValueError:
-            pass
-    if not vals:
-        return None, 0
-    return round(sum(vals) / len(vals), 1), len(vals)
-
-
 def compute_knowledge(df, pre_cols, post_cols):
-    """Match PRE and POST MCQ column pairs and compute gains."""
-    # Build display-name → col lookup for post columns
-    def disp(col):
-        # Strip __PRE / __POST suffix and section prefix
-        c = col
-        for sfx in ('__PRE', '__POST', '__EVAL'):
-            if c.upper().endswith(sfx):
-                c = c[:-len(sfx)]
-                break
-        return _display_of_key(c).strip()
-
-    post_by_disp = {}
-    for col in post_cols:
-        d = disp(col)
-        post_by_disp[d] = col
-
+    """
+    For each matched group of pre/post MCQ columns, compute % correct.
+    Groups may contain multiple columns (Exchange + Nexus versions) for the
+    same semantic question — all are merged into a single combined result.
+    """
+    groups = match_pre_post(df, pre_cols, post_cols)
     results = []
-    for pre_col in pre_cols:
-        if not is_mcq_col(pre_col, df[pre_col]):
-            continue
-        d = disp(pre_col)
-        post_col = post_by_disp.get(d)
-        if post_col is None:
-            # Try fuzzy: look for a post col whose display name shares ≥60% of words
-            pre_words = set(d.lower().split())
-            for pd_disp, pc in post_by_disp.items():
-                pc_words = set(pd_disp.lower().split())
-                overlap = len(pre_words & pc_words) / max(len(pre_words), 1)
-                if overlap >= 0.6:
-                    post_col = pc
-                    break
 
-        correct = get_correct_answer(pre_col)
+    for pre_group, post_group in groups:
+        # Merge all pre versions into one series (first non-null wins per row)
+        pre_ser  = df[pre_group].bfill(axis=1).iloc[:, 0]
+        post_ser = df[post_group].bfill(axis=1).iloc[:, 0]
 
-        # If no correct answer defined, try to infer from post (most common post answer)
-        inferred = False
-        if correct is None and post_col is not None:
-            post_nn = df[post_col].dropna()
-            if len(post_nn) > 0:
-                most_common = post_nn.value_counts().index[0]
-                correct = str(most_common).strip()
-                inferred = True
+        pre_vals  = pre_ser.dropna().astype(str)
+        post_vals = post_ser.dropna().astype(str)
 
-        pre_result  = pct_correct(df[pre_col],  correct)
-        post_result = pct_correct(df[post_col], correct) if post_col else None
+        if len(post_vals) < 5: continue
+        n_unique = post_vals.nunique()
+        if n_unique > 30 or n_unique < 2: continue
+        if is_likert_col(post_ser): continue
 
-        if pre_result is None:
+        # Skip if only one vendor has data and gain is trivially small (likely a behavior/frequency item)
+        both_vendor_mask = pre_ser.notna() & post_ser.notna()
+        ex_has = (df.loc[both_vendor_mask, '_source'] == 'Exchange').sum() if '_source' in df.columns else 0
+        nx_has = (df.loc[both_vendor_mask, '_source'] == 'Nexus').sum()    if '_source' in df.columns else 0
+        if nx_has == 0 and ex_has < 100:
+            # Only Exchange data and small n — likely a non-MCQ item, skip
             continue
 
-        pre_pct, pre_n = pre_result
-        post_pct = post_n = None
-        if post_result:
-            post_pct, post_n = post_result
+        # Correct answer = modal answer in POST
+        mode_series = post_vals.value_counts()
+        if mode_series.empty: continue
+        correct = mode_series.index[0]
 
-        p_val = None
-        if post_col and correct:
-            p_val = chi_square_pvalue(df[pre_col], df[post_col], correct)
+        # Matched pairs only
+        both_mask = pre_ser.notna() & post_ser.notna()
+        matched = df[both_mask]
+        if len(matched) < 5: continue
 
-        label = d[:80] if len(d) > 80 else d
+        pre_m  = pre_ser[both_mask].astype(str)
+        post_m = post_ser[both_mask].astype(str)
+        n      = len(matched)
+
+        pre_correct  = (pre_m  == correct).sum()
+        post_correct = (post_m == correct).sum()
+        pre_pct  = pct(pre_correct, n)
+        post_pct = pct(post_correct, n)
+        gain     = round(post_pct - pre_pct, 1) if pre_pct is not None and post_pct is not None else None
+
+        # Chi-square
+        try:
+            ct = pd.crosstab(
+                pd.concat([pd.Series(['pre']*n), pd.Series(['post']*n)]),
+                pd.concat([(pre_m == correct).astype(int), (post_m == correct).astype(int)])
+            )
+            _, p_val, _, _ = stats.chi2_contingency(ct)
+            p_val = round(p_val, 4)
+        except:
+            p_val = None
+
+        # Per-vendor stats: use each vendor's own pre/post series
+        def vendor_stats(src):
+            vdf = matched[matched['_source'] == src]
+            vn  = len(vdf)
+            if vn == 0: return None, None, None, 0
+            # Find best non-null PRE col for this vendor
+            v_pre  = df.loc[vdf.index, pre_group].bfill(axis=1).iloc[:, 0]
+            v_post = df.loc[vdf.index, post_group].bfill(axis=1).iloc[:, 0]
+            v_both = v_pre.notna() & v_post.notna()
+            v_pre_m  = v_pre[v_both].astype(str)
+            v_post_m = v_post[v_both].astype(str)
+            vn2 = len(v_pre_m)
+            if vn2 == 0: return None, None, None, 0
+            vp_pre  = pct((v_pre_m  == correct).sum(), vn2)
+            vp_post = pct((v_post_m == correct).sum(), vn2)
+            vg = round(vp_post - vp_pre, 1) if vp_pre is not None and vp_post is not None else None
+            return vp_pre, vp_post, vg, vn2
+
+        ex_pre, ex_post, ex_gain, ex_n = vendor_stats('Exchange')
+        nx_pre, nx_post, nx_gain, nx_n = vendor_stats('Nexus')
+
+        # Best label: prefer the longer / more complete text
+        label = strip_prefix(max(pre_group, key=len))
+
         results.append({
             'label':    label,
+            'pre_cols': pre_group,
+            'post_cols':post_group,
+            'correct':  correct,
             'pre_pct':  pre_pct,
             'post_pct': post_pct,
-            'gain':     round(post_pct - pre_pct, 1) if post_pct is not None else None,
-            'pre_n':    pre_n,
-            'post_n':   post_n,
+            'gain':     gain,
+            'n':        n,
             'p_val':    p_val,
-            'correct':  correct,
-            'inferred': inferred,
-            'pre_col':  pre_col,
-            'post_col': post_col,
+            'ex_pre': ex_pre, 'ex_post': ex_post, 'ex_gain': ex_gain, 'ex_n': ex_n,
+            'nx_pre': nx_pre, 'nx_post': nx_post, 'nx_gain': nx_gain, 'nx_n': nx_n,
         })
+
     return results
-
-
-def _normalize_likert_label(text):
-    """Normalize Likert question wording for PRE/POST matching."""
-    t = text.strip()
-    # Nexus uses "WILL YOU NOW" / "ARE YOU NOW" for post; Exchange uses "DO YOU CURRENTLY"
-    replacements = [
-        ('WILL YOU NOW', 'DO YOU CURRENTLY'),
-        ('ARE YOU NOW', 'ARE YOU CURRENTLY'),
-        ('DO YOU NOW', 'DO YOU CURRENTLY'),
-        (' NOW ', ' CURRENTLY '),
-    ]
-    tu = t.upper()
-    for old, new in replacements:
-        tu = tu.replace(old, new)
-    # Return normalized version preserving original case structure
-    return tu
-
 
 def compute_competence(df, pre_cols, post_cols):
-    """Match PRE/POST Likert column pairs and compute mean shifts."""
-    def disp(col):
-        c = col
-        for sfx in ('__PRE', '__POST', '__EVAL'):
-            if c.upper().endswith(sfx):
-                c = c[:-len(sfx)]
-                break
-        return _display_of_key(c).strip()
-
-    post_by_disp = {}
-    post_by_norm = {}
-    for col in post_cols:
-        d = disp(col)
-        post_by_disp[d] = col
-        post_by_norm[_normalize_likert_label(d)] = col
-
+    """
+    Match Likert-scale pre/post pairs (grouped across vendors).
+    """
+    groups = match_pre_post(df, pre_cols, post_cols)
     results = []
-    for pre_col in pre_cols:
-        scores = [to_likert(v) for v in df[pre_col] if to_likert(v) is not None]
-        if len(scores) < 5:
-            continue
-        d = disp(pre_col)
-        post_col = post_by_disp.get(d)
-        if post_col is None:
-            # Try normalized label matching (handles CURRENTLY vs NOW)
-            post_col = post_by_norm.get(_normalize_likert_label(d))
-        if post_col is None:
-            # Fuzzy word overlap
-            pre_words = set(d.upper().split())
-            # Remove time-point words that differ between pre/post
-            time_words = {'CURRENTLY', 'NOW', 'WILL', 'YOU', 'DO', 'ARE'}
-            pre_core = pre_words - time_words
-            best_match = None
-            best_score = 0
-            for pd_disp, pc in post_by_disp.items():
-                pc_words = set(pd_disp.upper().split()) - time_words
-                if not pre_core: continue
-                score = len(pre_core & pc_words) / len(pre_core)
-                if score > best_score and score >= 0.5:
-                    best_score = score
-                    best_match = pc
-            post_col = best_match
 
-        pre_scores  = [s for s in scores if s is not None]
-        post_scores = []
-        if post_col:
-            post_scores = [to_likert(v) for v in df[post_col] if to_likert(v) is not None]
+    for pre_group, post_group in groups:
+        pre_ser  = df[pre_group].bfill(axis=1).iloc[:, 0]
+        post_ser = df[post_group].bfill(axis=1).iloc[:, 0]
 
-        if not pre_scores:
+        if not is_likert_col(pre_ser) and not is_likert_col(post_ser):
             continue
 
-        pre_mean  = round(sum(pre_scores)  / len(pre_scores),  2)
-        post_mean = round(sum(post_scores) / len(post_scores), 2) if post_scores else None
-        pre_pct4  = round(100 * sum(1 for s in pre_scores  if s >= 4) / len(pre_scores),  1)
-        post_pct4 = round(100 * sum(1 for s in post_scores if s >= 4) / len(post_scores), 1) if post_scores else None
+        both_mask = pre_ser.apply(to_likert).notna() & post_ser.apply(to_likert).notna()
+        matched = df[both_mask]
+        if len(matched) < 5: continue
 
-        p_val = None
-        if post_scores and len(pre_scores) >= 3 and len(post_scores) >= 3:
-            try:
-                _, p_val = stats.ttest_ind(pre_scores, post_scores)
-                p_val = round(p_val, 4)
-            except Exception:
-                pass
+        mp = pre_ser[both_mask].apply(to_likert)
+        mq = post_ser[both_mask].apply(to_likert)
+        pre_mean  = round(float(mp.mean()), 2)
+        post_mean = round(float(mq.mean()), 2)
+        change    = round(post_mean - pre_mean, 2)
+        n         = len(matched)
 
-        label = d[:80] if len(d) > 80 else d
+        try:
+            _, p_val = stats.ttest_rel(mp, mq)
+            p_val = round(p_val, 4)
+        except:
+            p_val = None
+
+        def vendor_likert(src):
+            vdf = matched[matched['_source'] == src]
+            if len(vdf) < 3: return None, None, None, 0
+            vp = df.loc[vdf.index, pre_group].bfill(axis=1).iloc[:, 0].apply(to_likert)
+            vq = df.loc[vdf.index, post_group].bfill(axis=1).iloc[:, 0].apply(to_likert)
+            vn = int(vp.notna().sum())
+            return (round(float(vp.mean()), 2) if vn > 0 else None,
+                    round(float(vq.mean()), 2) if vn > 0 else None,
+                    round(float(vq.mean()-vp.mean()), 2) if vn > 0 else None, vn)
+
+        ex_pre, ex_post, ex_chg, ex_n = vendor_likert('Exchange')
+        nx_pre, nx_post, nx_chg, nx_n = vendor_likert('Nexus')
+
+        label = strip_prefix(max(pre_group, key=len))
         results.append({
-            'label':    label,
-            'pre_mean': pre_mean,
+            'label':     label,
+            'pre_cols':  pre_group,
+            'post_cols': post_group,
+            'pre_mean':  pre_mean,
             'post_mean': post_mean,
-            'delta_mean': round(post_mean - pre_mean, 2) if post_mean else None,
-            'pre_pct4': pre_pct4,
-            'post_pct4': post_pct4,
-            'delta_pct4': round(post_pct4 - pre_pct4, 1) if post_pct4 is not None else None,
-            'pre_n':   len(pre_scores),
-            'post_n':  len(post_scores),
-            'p_val':   p_val,
-            'pre_col': pre_col,
-            'post_col': post_col,
+            'change':    change,
+            'n':         n,
+            'p_val':     p_val,
+            'ex_pre': ex_pre, 'ex_post': ex_post, 'ex_chg': ex_chg, 'ex_n': ex_n,
+            'nx_pre': nx_pre, 'nx_post': nx_post, 'nx_chg': nx_chg, 'nx_n': nx_n,
         })
+
     return results
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# COMPUTE EVALUATION
+# ══════════════════════════════════════════════════════════════════════════════
+INTENT_KEYWORDS      = ['intend to', 'plan to change', 'modify', 'change my practice']
+RECOMMEND_KEYWORDS   = ['recommend this program', 'recommend this activity']
+BIAS_KEYWORDS        = ['free of commercial bias', 'free of bias', 'balanced coverage']
+CONTENT_NEW_KEYWORDS = ['content.*new', 'percentage.*new', 'new.*content', 'how much.*new']
+SAT_KEYWORDS         = ['knowledgeable', 'relevant', 'useful tools', 'teaching.*method',
+                        'faculty', 'learning method', 'enhanced my knowledge',
+                        'improve patient', 'effective', 'learning objectives']
+BARRIER_KEYWORDS     = ['significant barrier', 'significant challenge', 'obstacle']
+BEHAVIOR_KEYWORDS    = ['intend to incorporate', 'plan to incorporate', 'change your practice behavior',
+                        'types of change', 'will you now']
+EVAL_COMPETENCE_KEYWORDS = [
+    'incorporate', 'create comprehensive', 'review patient selection',
+    'participants will be able', 'upon completion',
+    'identify', 'implement', 'determine', 'describe',
+]
+
+def find_eval_col(df, eval_cols, keywords):
+    for kw in keywords:
+        for c in eval_cols:
+            lbl = strip_prefix(c).lower()
+            if re.search(kw, lbl, re.I):
+                return c
+    return None
+
+def eval_yes_pct(df, col):
+    if col is None: return None, None
+    vals = df[col].dropna().astype(str).str.strip()
+    if len(vals) == 0: return None, None
+    n = len(vals)
+    lvals = vals.str.lower()
+    yes_mask = lvals.str.match(r'^yes', na=False)
+    if yes_mask.sum() / n > 0.05:
+        return pct(yes_mask.sum(), n), int(n)
+    agree_mask = lvals.str.match(r'^(strongly agree|agree)$', na=False)
+    if agree_mask.sum() > 0:
+        return pct(agree_mask.sum(), n), int(n)
+    pos_mask = lvals.str.match(r'^(4|5|very|extremely|always|often)', na=False)
+    if pos_mask.sum() / n > 0.05:
+        return pct(pos_mask.sum(), n), int(n)
+    return None, None
+
+def eval_pct_from_content_new(series):
+    def parse_one(v):
+        if v is None: return None
+        if isinstance(v, (int, float)):
+            f = float(v)
+            if f <= 1: return f * 100
+            if f <= 100: return f
+            return None
+        s = str(v).strip()
+        m = re.search(r'(\d+)\s*-\s*(\d+)', s)
+        if m: return (int(m.group(1)) + int(m.group(2))) / 2
+        m2 = re.search(r'(\d+(?:\.\d+)?)', s)
+        if m2:
+            f = float(m2.group(1))
+            if f <= 1: return f * 100
+            return f
+        return None
+    parsed = series.apply(parse_one).dropna()
+    return round(float(parsed.mean()), 1) if len(parsed) > 0 else None
+
+def _vendor_yes(df, col, src):
+    if '_source' not in df.columns or col is None: return None
+    vdf = df[df['_source'] == src]
+    if len(vdf) == 0: return None
+    vals = vdf[col].dropna().astype(str).str.strip()
+    if len(vals) == 0: return None
+    lvals = vals.str.lower()
+    n = len(lvals)
+    yes_mask = lvals.str.match(r'^yes', na=False)
+    if yes_mask.sum() / n > 0.05:
+        return pct(yes_mask.sum(), n)
+    agree_mask = lvals.str.match(r'^(strongly agree|agree)$', na=False)
+    if agree_mask.sum() > 0:
+        return pct(agree_mask.sum(), n)
+    pos_mask = lvals.str.match(r'^(4|5|very|extremely|always|often)', na=False)
+    return pct(pos_mask.sum(), n)
+
 def compute_evaluation(df, eval_cols):
-    """Compute evaluation metrics from eval columns."""
-    metrics = {}
+    import pandas as pd
+    result = {}
 
-    # Intent to change
-    intent_col = find_col(df, 'intend', exclude=['barrier']) or \
-                 find_col(df, 'modify', 'practice') or \
-                 find_col(df, 'intent') or \
-                 find_col(df, 'change', 'practice', exclude=['barrier'])
-    if intent_col:
-        pct, n = pct_yes(df[intent_col])
-        metrics['intent'] = {'pct': pct, 'n': n, 'col': intent_col}
+    ic = find_eval_col(df, eval_cols, INTENT_KEYWORDS)
+    if ic:
+        p, n = eval_yes_pct(df, ic)
+        result['intent'] = {'col': ic, 'pct': p, 'n': n,
+            'ex_pct': _vendor_yes(df, ic, 'Exchange'),
+            'nx_pct': _vendor_yes(df, ic, 'Nexus'),
+            'ex_n': int((df['_source']=='Exchange').sum()) if '_source' in df.columns else 0,
+            'nx_n': int((df['_source']=='Nexus').sum()) if '_source' in df.columns else 0,
+        }
 
-    # Would recommend - must be in eval_cols only, exclude MCQ question columns
-    rec_col = None
-    for col in eval_cols:
-        if 'recommend' in col.lower() and len(col) < 60:
-            rec_col = col
-            break
-    if rec_col is None:
-        rec_col = find_col(df, 'would you recommend') or find_col(df, 'recommend this program')
-    if rec_col:
-        pct, n = pct_yes(df[rec_col])
-        metrics['recommend'] = {'pct': pct, 'n': n, 'col': rec_col}
+    rc = find_eval_col(df, eval_cols, RECOMMEND_KEYWORDS)
+    if rc:
+        p, n = eval_yes_pct(df, rc)
+        result['recommend'] = {'col': rc, 'pct': p, 'n': n,
+            'ex_pct': _vendor_yes(df, rc, 'Exchange'),
+            'nx_pct': _vendor_yes(df, rc, 'Nexus'),
+        }
 
-    # Bias-free
-    bias_col = find_col(df, 'free', 'commercial') or \
-               find_col(df, 'free', 'bias') or \
-               find_col(df, 'bias')
-    if bias_col:
-        pct, n = pct_yes(df[bias_col])
-        metrics['bias_free'] = {'pct': pct, 'n': n, 'col': bias_col}
+    bc = find_eval_col(df, eval_cols, BIAS_KEYWORDS)
+    if bc:
+        p, n = eval_yes_pct(df, bc)
+        result['bias_free'] = {'col': bc, 'pct': p, 'n': n,
+            'ex_pct': _vendor_yes(df, bc, 'Exchange'),
+            'nx_pct': _vendor_yes(df, bc, 'Nexus'),
+        }
 
-    # Content was new
-    new_col = find_col(df, 'new', exclude=['renew', 'knew']) or \
-              find_col(df, 'percentage', 'content') or \
-              find_col(df, 'content', 'new')
-    if new_col:
-        pct, n = avg_pct_new(df[new_col])
-        metrics['content_new'] = {'pct': pct, 'n': n, 'col': new_col}
+    nc = find_eval_col(df, eval_cols, CONTENT_NEW_KEYWORDS)
+    if nc:
+        p = eval_pct_from_content_new(df[nc])
+        n = int(df[nc].notna().sum())
+        result['content_new'] = {'col': nc, 'pct': p, 'n': n,
+            'ex_pct': eval_pct_from_content_new(df[df['_source']=='Exchange'][nc]) if '_source' in df.columns else None,
+            'nx_pct': eval_pct_from_content_new(df[df['_source']=='Nexus'][nc]) if '_source' in df.columns else None,
+        }
 
-    # Satisfaction items — any eval col with Likert agree/disagree responses
-    SAT_INCLUDE = ['faculty', 'knowledgeable', 'content presented', 'useful tools',
-                   'teaching', 'learning methods', 'more confident', 'fair and balanced',
-                   'relevant', 'enhanced', 'objectives', 'objective']
-    SAT_EXCLUDE = ['intend', 'modify', 'recommend', 'bias', 'new to you', 'percentage',
-                   'barrier', 'plan to', 'accommodate', 'utilized', 'patient access',
-                   'please', 'comment', 'feedback', 'topic', 'credit', 'specify',
-                   'how long', 'practice type', 'specialty', 'if no', 'explain']
-    satisfaction_raw = []
-    for col in eval_cols:
-        cl = col.lower()
-        if any(ex in cl for ex in SAT_EXCLUDE):
-            continue
-        if not any(inc in cl for inc in SAT_INCLUDE):
-            continue
-        pct, n = pct_agree(df[col])
-        if pct is not None and n > 0:
-            label = col
-            for pfx in ['Please indicate the extent of your agreement with the following statements:>> ',
-                        'EVAL_', 'META_', 'PRE_', 'POST_']:
-                label = label.replace(pfx, '')
-            label = label[:70]
-            satisfaction_raw.append({'label': label, 'pct': pct, 'n': n, 'col': col})
+    sat_items = []
+    for c in eval_cols:
+        lbl = strip_prefix(c).lower()
+        if any(re.search(kw, lbl, re.I) for kw in SAT_KEYWORDS):
+            lv = df[c].apply(to_likert).dropna()
+            if len(lv) < 5: continue
+            m  = round(float(lv.mean()), 2)
+            n  = int(len(lv))
+            ex_lv = df[df['_source']=='Exchange'][c].apply(to_likert).dropna() if '_source' in df.columns else pd.Series(dtype=float)
+            nx_lv = df[df['_source']=='Nexus'][c].apply(to_likert).dropna()    if '_source' in df.columns else pd.Series(dtype=float)
+            sat_items.append({
+                'col': c, 'label': strip_prefix(c), 'mean': m, 'n': n,
+                'ex_mean': round(float(ex_lv.mean()), 2) if len(ex_lv) > 0 else None,
+                'nx_mean': round(float(nx_lv.mean()), 2) if len(nx_lv) > 0 else None,
+                'ex_n': int(len(ex_lv)), 'nx_n': int(len(nx_lv)),
+            })
+    result['satisfaction'] = sat_items
 
-    # Deduplicate: for questions with similar wording, keep the one with most respondents
-    seen_norm = {}
-    for item in satisfaction_raw:
-        # Normalize: lowercase, strip punctuation, first 45 chars
-        norm = ''.join(c for c in item['label'].lower() if c.isalnum() or c == ' ')[:45].strip()
-        if norm not in seen_norm or item['n'] > seen_norm[norm]['n']:
-            seen_norm[norm] = item
-    satisfaction = list(seen_norm.values())
-    # Sort by pct descending
-    satisfaction.sort(key=lambda x: x['pct'] or 0, reverse=True)
-    metrics['satisfaction'] = satisfaction
+    behavior_items = []
+    barrier_items  = []
+    for c in eval_cols:
+        lbl = strip_prefix(c).lower()
+        if any(re.search(kw, lbl, re.I) for kw in BEHAVIOR_KEYWORDS):
+            vc = df[c].dropna()
+            if len(vc) > 3:
+                behavior_items.append({'col': c, 'label': strip_prefix(c), 'vals': vc.tolist()})
+        if any(re.search(kw, lbl, re.I) for kw in BARRIER_KEYWORDS):
+            vc = df[c].dropna()
+            if len(vc) > 3:
+                barrier_items.append({'col': c, 'label': strip_prefix(c), 'vals': vc.tolist()})
 
-    # Behavior change — look for the "plan to implement" eval column
-    behavior_col = find_col(df, 'plan to change') or find_col(df, 'plan to implement') or                    find_col(df, 'types of changes') or find_col(df, 'behavior', 'changes do you plan')
-    if behavior_col:
-        from collections import Counter
-        all_vals = []
-        for v in df[behavior_col].dropna():
-            s = str(v).strip()
-            if not s or s.lower() == 'nan':
-                continue
-            # Split on newlines or pipes only, NOT commas (phrases contain commas)
-            if '\n' in s:
-                parts = [p.strip() for p in s.split('\n') if p.strip()]
-            elif ' | ' in s:
-                parts = [p.strip() for p in s.split(' | ') if p.strip()]
-            else:
-                parts = [s]
-            all_vals.extend([clean_text(p[:80]) for p in parts])
-        counts = dict(Counter(all_vals).most_common(10))
-        metrics['behavior_change'] = counts
+    result['behavior'] = behavior_items
+    result['barriers'] = barrier_items
 
-    # Barriers - find columns with "patient-level", "provider-level", "system-level"
-    barrier_patterns = {
-        'patient':  ['patient-level barrier', 'patient level barrier', 'significant patient'],
-        'provider': ['provider-level barrier', 'provider level barrier', 'significant provider'],
-        'system':   ['system-level barrier', 'system level barrier', 'significant system'],
+    eval_comp_items = []
+    for c in eval_cols:
+        lbl = strip_prefix(c).lower()
+        if any(re.search(kw, lbl, re.I) for kw in EVAL_COMPETENCE_KEYWORDS):
+            lv = df[c].apply(to_likert).dropna()
+            if len(lv) < 5: continue
+            m  = round(float(lv.mean()), 2)
+            n  = int(len(lv))
+            ex_lv = df[df['_source']=='Exchange'][c].apply(to_likert).dropna() if '_source' in df.columns else pd.Series(dtype=float)
+            nx_lv = df[df['_source']=='Nexus'][c].apply(to_likert).dropna()    if '_source' in df.columns else pd.Series(dtype=float)
+            eval_comp_items.append({
+                'col': c, 'label': strip_prefix(c), 'mean': m, 'n': n,
+                'ex_mean': round(float(ex_lv.mean()), 2) if len(ex_lv) > 0 else None,
+                'nx_mean': round(float(nx_lv.mean()), 2) if len(nx_lv) > 0 else None,
+                'ex_n': int(len(ex_lv)), 'nx_n': int(len(nx_lv)),
+            })
+    result['eval_competence'] = eval_comp_items
+
+    return result
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COMPUTE SUMMARY
+# ══════════════════════════════════════════════════════════════════════════════
+def compute_summary(df):
+    import pandas as pd
+    if df.empty: return {}
+    ex_df = df[df['_source']=='Exchange'] if '_source' in df.columns else pd.DataFrame()
+    nx_df = df[df['_source']=='Nexus']    if '_source' in df.columns else pd.DataFrame()
+
+    has_post   = df['_has_post'].fillna(False).astype(bool)  if '_has_post'  in df.columns else pd.Series(False, index=df.index)
+    has_eval_s = df['_has_eval'].fillna(False).astype(bool)  if '_has_eval'  in df.columns else pd.Series(False, index=df.index)
+
+    total      = len(df)
+    nx_matched = int(has_post.sum())
+    post_cols_present = [c for c in df.columns if c.startswith('POST__')]
+    ex_matched = int(ex_df[post_cols_present[0]].notna().sum()) if post_cols_present and len(ex_df) > 0 else 0
+    matched    = ex_matched + nx_matched
+
+    nx_eval  = int(has_eval_s.sum())
+    eval_cols_ex = [c for c in df.columns if c.startswith('EVAL__')]
+    ex_eval  = int(ex_df[eval_cols_ex[0]].notna().sum()) if eval_cols_ex and len(ex_df) > 0 else 0
+    with_eval = ex_eval + nx_eval
+
+    return {
+        'total':      total,
+        'ex_total':   len(ex_df),
+        'nx_total':   len(nx_df),
+        'matched':    matched,
+        'ex_matched': ex_matched,
+        'nx_matched': nx_matched,
+        'with_eval':  with_eval,
+        'pre_only':   total - matched,
+        'match_pct':  pct(matched, total),
     }
-    for barrier_type, patterns in barrier_patterns.items():
-        bc = None
-        for pat in patterns:
-            bc = find_col(df, pat)
-            if bc:
-                break
-        if bc is None:
-            bc = find_col(df, 'barrier', barrier_type)
-        if bc:
-            from collections import Counter
-            all_vals = []
-            for v in df[bc].dropna():
-                s = str(v).strip()
-                if not s or s.lower() == 'nan':
-                    continue
-                # Only split if the value looks like a checkbox list
-                # (contains newlines or " | " separators, NOT regular commas in phrases)
-                if '\n' in s:
-                    parts = [p.strip() for p in s.split('\n') if p.strip()]
-                elif ' | ' in s:
-                    parts = [p.strip() for p in s.split(' | ') if p.strip()]
-                else:
-                    # Treat entire value as one item (comma is part of the phrase)
-                    parts = [s]
-                all_vals.extend(parts)
-            counts = dict(Counter(all_vals).most_common(8))
-            metrics[f'barrier_{barrier_type}'] = counts
-
-    # Follow-up
-    fu_cols = [c for c in df.columns if 'FOLLOWUP' in c.upper() or c.upper().endswith('__FOLLOWUP')]
-    metrics['followup_n'] = int(df['_has_followup'].apply(
-        lambda v: str(v).strip().lower() in ('true', 'yes', '1')
-    ).sum()) if '_has_followup' in df.columns else 0
-
-    return metrics
-
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 6 — STREAMLIT UI HELPERS
+# FILTER DATAFRAME
 # ══════════════════════════════════════════════════════════════════════════════
+def apply_filters(df):
+    if df.empty: return df
+    filt = df.copy()
+    vf = st.session_state.get('vendor_filter', 'All')
+    if vf == 'Exchange': filt = filt[filt['_source'] == 'Exchange']
+    elif vf == 'Nexus':  filt = filt[filt['_source'] == 'Nexus']
+    sf = st.session_state.get('specialty_filter', 'All')
+    if sf != 'All':
+        spec_col = next((c for c in filt.columns if 'specialty' in c.lower()
+                         and 'eval' not in c.lower()), None)
+        if spec_col:
+            filt = filt[filt[spec_col].astype(str).str.lower() == sf.lower()]
+    return filt
 
-def metric_card(label, value, delta=None, info=None, color="#3b82f6"):
-    delta_html = ''
-    if delta is not None:
-        dc = '#22c55e' if delta >= 0 else '#ef4444'
-        sign = '+' if delta >= 0 else ''
-        delta_html = f'<div style="color:{dc};font-size:13px;margin-top:4px">{sign}{delta}</div>'
-    info_html = f'<span title="{info}" style="cursor:help;color:#64748b;font-size:11px"> ℹ</span>' if info else ''
-    st.markdown(f"""
-<div style="background:linear-gradient(135deg,#1e293b,#0f172a);
-            border:1px solid {color}40;border-radius:14px;
-            padding:18px 16px;text-align:center;margin-bottom:8px;
-            box-shadow:0 4px 12px {color}20">
-  <div style="font-size:11px;color:#64748b;text-transform:uppercase;
-              letter-spacing:1px;margin-bottom:8px">{label}{info_html}</div>
-  <div style="font-size:30px;font-weight:800;color:#f1f5f9;
-              background:linear-gradient(135deg,#f1f5f9,{color});
-              -webkit-background-clip:text;-webkit-text-fill-color:transparent">{value}</div>
-  {delta_html}
-</div>
-""", unsafe_allow_html=True)
+def get_specialties(df):
+    spec_col = next((c for c in df.columns if 'specialty' in c.lower()
+                     and 'eval' not in c.lower()), None)
+    if spec_col is None: return []
+    return sorted(df[spec_col].dropna().astype(str).unique().tolist())
 
+# ══════════════════════════════════════════════════════════════════════════════
+# XLSX EXPORT
+# ══════════════════════════════════════════════════════════════════════════════
+def export_xlsx(df, kn, comp, ev, summary):
+    import pandas as pd
+    buf = io.BytesIO()
+    wb = openpyxl.Workbook()
+    hdr_fill = PatternFill('solid', fgColor='0F172A')
+    hdr_font = Font(color='22D3EE', bold=True)
 
-def progress_bar_html(pct, color="#3b82f6", label="", show_pct=True):
-    """Render a colored progress bar."""
-    if pct is None:
-        return ""
-    safe_pct = min(100, max(0, pct))
-    pct_text = f"{pct}%" if show_pct else ""
-    return f"""
-<div style="margin:6px 0">
-  <div style="display:flex;justify-content:space-between;margin-bottom:4px">
-    <span style="font-size:12px;color:#cbd5e1">{label}</span>
-    <span style="font-size:12px;font-weight:700;color:#f1f5f9">{pct_text}</span>
-  </div>
-  <div style="background:#1e293b;border-radius:6px;height:10px;overflow:hidden">
-    <div style="background:linear-gradient(90deg,{color},{color}cc);
-                width:{safe_pct}%;height:100%;border-radius:6px;
-                transition:width 0.3s ease"></div>
-  </div>
-</div>"""
+    def write_sheet(ws, headers, rows):
+        ws.append(headers)
+        for cell in ws[1]:
+            cell.fill = hdr_fill
+            cell.font = hdr_font
+        for row in rows:
+            ws.append(row)
 
+    ws1 = wb.active; ws1.title = 'Summary'
+    write_sheet(ws1, ['Metric', 'Value'], [
+        ['Total Learners',    summary.get('total', 0)],
+        ['Exchange Learners', summary.get('ex_total', 0)],
+        ['Nexus Learners',    summary.get('nx_total', 0)],
+        ['Pre/Post Matched',  summary.get('matched', 0)],
+        ['Match Rate',        f"{summary.get('match_pct', '—')}%"],
+        ['With Evaluation',   summary.get('with_eval', 0)],
+    ])
 
-def donut_metric(label, pct, color="#3b82f6", n=None):
-    """SVG donut chart for a single percentage metric."""
-    if pct is None:
-        pct = 0
-    safe_pct = min(100, max(0, pct))
-    r = 36
-    circ = 2 * 3.14159 * r
-    dash = (safe_pct / 100) * circ
-    n_text = f"n={n}" if n else ""
-    return f"""
-<div style="text-align:center;padding:12px 8px">
-  <svg width="100" height="100" viewBox="0 0 100 100">
-    <circle cx="50" cy="50" r="{r}" fill="none" stroke="#1e293b" stroke-width="10"/>
-    <circle cx="50" cy="50" r="{r}" fill="none" stroke="{color}" stroke-width="10"
-            stroke-dasharray="{dash:.1f} {circ:.1f}"
-            stroke-dashoffset="{circ/4:.1f}"
-            stroke-linecap="round"/>
-    <text x="50" y="46" text-anchor="middle" fill="#f1f5f9"
-          font-size="16" font-weight="800">{pct}%</text>
-    <text x="50" y="60" text-anchor="middle" fill="#64748b" font-size="9">{n_text}</text>
-  </svg>
-  <div style="font-size:11px;color:#94a3b8;margin-top:4px;font-weight:600">{label}</div>
-</div>"""
+    ws2 = wb.create_sheet('Knowledge')
+    write_sheet(ws2, ['Question','N','Pre%','Post%','Gain(pp)','p-value',
+                      'Ex Pre%','Ex Post%','Nx Pre%','Nx Post%'],
+        [[r['label'], r['n'], r['pre_pct'], r['post_pct'], r['gain'], r['p_val'],
+          r.get('ex_pre'), r.get('ex_post'), r.get('nx_pre'), r.get('nx_post')] for r in kn])
 
+    ws3 = wb.create_sheet('Competence')
+    write_sheet(ws3, ['Item','N','Pre Mean','Post Mean','Change','p-value',
+                      'Ex Pre','Ex Post','Nx Pre','Nx Post'],
+        [[r['label'], r['n'], r['pre_mean'], r['post_mean'], r['change'], r['p_val'],
+          r.get('ex_pre'), r.get('ex_post'), r.get('nx_pre'), r.get('nx_post')] for r in comp])
 
-def pval_badge(p):
-    if p is None:
-        return '<span style="color:#64748b">NS</span>'
-    if p < 0.001:
-        return '<span style="color:#22c55e;font-weight:700">p&lt;0.001 ✓</span>'
-    if p < 0.01:
-        return '<span style="color:#22c55e">p&lt;0.01 ✓</span>'
-    if p < 0.05:
-        return '<span style="color:#86efac">p&lt;0.05 ✓</span>'
-    if p < 0.10:
-        return '<span style="color:#fbbf24">p&lt;0.10 ~</span>'
-    return f'<span style="color:#64748b">p={p:.3f}</span>'
+    ws4 = wb.create_sheet('Evaluation')
+    write_sheet(ws4, ['Metric','Combined%','N','Exchange%','Nexus%'],
+        [[k, ev.get(k,{}).get('pct'), ev.get(k,{}).get('n'),
+          ev.get(k,{}).get('ex_pct'), ev.get(k,{}).get('nx_pct')]
+         for k in ['intent','recommend','bias_free','content_new']])
 
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
 
-def bar_html(pct, color='#3b82f6', max_width=200):
-    if pct is None:
-        return ''
-    w = int(max_width * pct / 100)
-    return (f'<div style="display:inline-block;background:{color};'
-            f'height:10px;width:{w}px;border-radius:3px;vertical-align:middle"></div> '
-            f'<span style="font-size:12px">{pct}%</span>')
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB RENDERERS
+# ══════════════════════════════════════════════════════════════════════════════
+TABS = ['Overview', 'Knowledge', 'Competence', 'Evaluation',
+        'AI Insights', 'JCEHP Article', 'CIRCLE Framework',
+        'Kirkpatrick', 'Key Findings']
 
+def tab_overview(df, summary, ev, kn, comp):
+    m = summary
+    avg_kn_gain = round(sum(r['gain'] for r in kn if r['gain']) / max(1, len(kn)), 1) if kn else None
+    avg_comp_chg = round(sum(r['change'] for r in comp if r['change']) / max(1, len(comp)), 2) if comp else None
 
-def clean_text(text):
-    """Fix common encoding issues in column names and values."""
-    if not text:
-        return text
-    replacements = [
-        ('â', '–'),  # â€" -> en dash
-        ('â', '—'),  # â€" -> em dash
-        ('â', '“'),  # â€œ -> left quote
-        ('â', '”'),  # â€ -> right quote
-        ('â', '‘'),  # â€˜ -> left single
-        ('â', '’'),  # â€™ -> right single
-        ('Â ', ' '),             # Â  -> space
-        ('â1', '–1'), # common combo
-        ('â', '–'),
-        ('â', '—'),
-        ('â', '’'),
-        ('â', '“'),
-        ('â', '”'),
-        ('â€"', '–'),
-        ('â€™', '’'),
-        ('â€œ', '“'),
-        ('â€', '”'),
+    cards = [
+        ('Total Learners',    m.get('total', 0),   '#60a5fa',
+         f"Ex: {m.get('ex_total',0)} | Nx: {m.get('nx_total',0)}"),
+        ('Pre-Only',          m.get('pre_only', 0),'#fb923c', 'Pre-test only'),
+        ('Pre/Post Matched',  m.get('matched', 0), '#4ade80',
+         f"{m.get('match_pct','—')}% match rate"),
+        ('With Evaluation',   m.get('with_eval',0),'#a78bfa', 'Completed eval'),
+        ('Avg Knowledge Gain',
+         f"+{avg_kn_gain}pp" if avg_kn_gain else '—', '#22d3ee',
+         f"{len(kn)} questions"),
+        ('Avg Competence Gain',
+         f"+{avg_comp_chg}" if avg_comp_chg else '—', '#22d3ee',
+         f"{len(comp)} Likert items"),
     ]
-    for bad, good in replacements:
-        text = text.replace(bad, good)
-    return text
+    html = '<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:14px;margin-bottom:24px">'
+    for lbl, val, color, sub in cards:
+        html += f"""
+<div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:16px;cursor:pointer">
+  <div style="color:#94a3b8;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">{lbl}</div>
+  <div style="font-size:28px;font-weight:700;color:{color};line-height:1">{val}</div>
+  <div style="color:#64748b;font-size:11px;margin-top:4px">{sub}</div>
+</div>"""
+    html += '</div>'
+    st.markdown(html, unsafe_allow_html=True)
 
-
-def source_breakdown(df, col, compute_fn):
-    """Return {Exchange: val, Nexus: val, Combined: val} for any metric fn."""
-    out = {}
-    for src in ('Exchange', 'Nexus', 'Combined'):
-        if src == 'Combined':
-            subset = df
-        else:
-            subset = df[df['_source'] == src] if '_source' in df.columns else df
-        if len(subset) == 0:
-            out[src] = (None, 0)
-            continue
-        out[src] = compute_fn(subset[col])
-    return out
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 6b — POPUP / DETAIL PANEL HELPER
-# ══════════════════════════════════════════════════════════════════════════════
-
-METRIC_DEFINITIONS = {
-    'intent': {
-        'name': 'Intent to Change Practice',
-        'definition': 'The percentage of evaluation respondents who indicated they intend to modify or change their clinical practice as a result of this educational activity.',
-        'formula': 'COUNT(Yes / Agree / Strongly Agree responses) ÷ COUNT(non-null responses) × 100',
-        'moore_level': "Moore's Level 4 - Competence",
-    },
-    'recommend': {
-        'name': 'Would Recommend',
-        'definition': 'The percentage of evaluation respondents who indicated they would recommend this program to a colleague.',
-        'formula': 'COUNT(Yes responses) ÷ COUNT(non-null responses) × 100',
-        'moore_level': "Moore's Level 3 - Learning",
-    },
-    'bias_free': {
-        'name': 'Free of Commercial Bias',
-        'definition': 'The percentage of evaluation respondents who rated the educational content as free of commercial bias.',
-        'formula': 'COUNT(Yes responses) ÷ COUNT(non-null responses) × 100',
-        'moore_level': "Moore's Level 3 - Learning",
-    },
-    'content_new': {
-        'name': 'Content Was New',
-        'definition': 'The average percentage of educational content that respondents rated as new to them — indicating the degree of knowledge gap addressed.',
-        'formula': 'MEAN(% new ratings across all respondents with valid responses)',
-        'moore_level': "Moore's Level 2 - Participation",
-    },
-    'knowledge': {
-        'name': 'Knowledge Gain (MCQ % Correct)',
-        'definition': 'The percentage of respondents selecting the correct answer on a multiple-choice question, comparing pre-test vs post-test performance.',
-        'formula': 'COUNT(correct responses) ÷ COUNT(non-null responses) × 100',
-        'moore_level': "Moore's Level 4 - Competence",
-    },
-    'competence': {
-        'name': 'Competence / Confidence Shift (Likert)',
-        'definition': 'The mean score on a 5-point Likert scale comparing pre-test vs post-test self-reported competence or confidence.',
-        'formula': 'MEAN(Likert scores 1-5) at pre vs post; % ≥4 = COUNT(scores ≥ 4) ÷ COUNT(non-null) × 100',
-        'moore_level': "Moore's Level 4 - Competence",
-    },
-    'satisfaction': {
-        'name': 'Satisfaction (% Agree / Strongly Agree)',
-        'definition': 'The percentage of respondents selecting Agree or Strongly Agree on a satisfaction item about the educational activity.',
-        'formula': 'COUNT(Agree + Strongly Agree) ÷ COUNT(non-null responses) × 100',
-        'moore_level': "Moore's Level 3 - Learning",
-    },
-}
-
-
-def show_metric_popup(metric_key, df, col_name=None, extra_stats=None):
-    """Show an expander with definition, formula, Moore level, and source breakdown."""
-    defn = METRIC_DEFINITIONS.get(metric_key, {})
-    with st.expander(f"ℹ  {defn.get('name', metric_key)} — Details & Source Breakdown"):
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown(f"**Definition**")
-            st.markdown(defn.get('definition', '—'))
-            st.markdown(f"**Formula**")
-            st.code(defn.get('formula', '—'), language=None)
-            st.markdown(f"**Moore's Level:** `{defn.get('moore_level', '—')}`")
-        with c2:
-            st.markdown("**Source Breakdown**")
-            if col_name and col_name in df.columns:
-                for src in ['Exchange', 'Nexus', 'Combined']:
-                    sub = df if src == 'Combined' else df[df['_source'] == src] if '_source' in df.columns else df
-                    n = len(sub[col_name].dropna())
-                    if metric_key == 'content_new':
-                        pct, _ = avg_pct_new(sub[col_name])
-                    elif metric_key in ('intent', 'recommend', 'bias_free', 'satisfaction'):
-                        pct, _ = pct_yes(sub[col_name])
-                    else:
-                        pct = None
-                    val_str = f"{pct}%" if pct is not None else "—"
-                    bar = f'<div style="display:inline-block;background:#3b82f6;height:8px;width:{int((pct or 0)*1.5)}px;border-radius:3px;vertical-align:middle;margin:0 6px"></div>' if pct else ''
-                    st.markdown(f"**{src}** (n={n}): {val_str} {bar}", unsafe_allow_html=True)
-            if extra_stats:
-                st.markdown("**Additional Stats**")
-                for k, v in extra_stats.items():
-                    st.markdown(f"- {k}: **{v}**")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 7 — TAB 1: MERGER
-# ══════════════════════════════════════════════════════════════════════════════
-
-def render_merger():
-    st.subheader("Step 1 — Upload Source Files")
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown("**Exchange File**")
-        ex_file = st.file_uploader("Upload Exchange .xlsx", type=['xlsx', 'xls'],
-                                    key='ex_upload', label_visibility='collapsed')
+        st.markdown('<div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:20px">', unsafe_allow_html=True)
+        st.markdown('<div style="color:#e2e8f0;font-size:15px;font-weight:600;margin-bottom:14px">📚 Knowledge (Moore Level 3)</div>', unsafe_allow_html=True)
+        if kn:
+            tbl = '<table style="width:100%;border-collapse:collapse"><thead><tr>'
+            for h in ['Question', 'Pre', 'Post', 'Gain', 'p']:
+                tbl += f'<th style="color:#94a3b8;font-size:11px;text-transform:uppercase;padding:8px 6px;border-bottom:1px solid #334155;text-align:left">{h}</th>'
+            tbl += '</tr></thead><tbody>'
+            for r in kn:
+                gain_color = '#4ade80' if r['gain'] and r['gain'] > 0 else '#f87171'
+                gain_str = f"+{r['gain']}pp" if r['gain'] and r['gain'] > 0 else f"{r['gain']}pp"
+                p_str = '<0.001' if r['p_val'] and r['p_val'] < 0.001 else (str(r['p_val']) if r['p_val'] else '—')
+                tbl += f'''<tr>
+  <td style="color:#e2e8f0;font-size:12px;padding:9px 6px;border-bottom:1px solid #1e293b" title="{r["label"]}">{short(r["label"],42)}</td>
+  <td style="color:#e2e8f0;font-size:12px;padding:9px 6px;border-bottom:1px solid #1e293b">{r["pre_pct"]}%</td>
+  <td style="color:#e2e8f0;font-size:12px;padding:9px 6px;border-bottom:1px solid #1e293b">{r["post_pct"]}%</td>
+  <td style="color:{gain_color};font-size:12px;font-weight:600;padding:9px 6px;border-bottom:1px solid #1e293b">{gain_str}</td>
+  <td style="color:#94a3b8;font-size:11px;padding:9px 6px;border-bottom:1px solid #1e293b">{p_str}</td>
+</tr>'''
+            tbl += '</tbody></table>'
+            st.markdown(tbl, unsafe_allow_html=True)
+        else:
+            st.markdown('<div style="color:#64748b;font-size:13px">No MCQ pairs detected.</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
     with col2:
-        st.markdown("**Nexus File**")
-        nx_file = st.file_uploader("Upload Nexus .xlsx", type=['xlsx', 'xls'],
-                                    key='nx_upload', label_visibility='collapsed')
+        # Competence
+        st.markdown('<div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:20px;margin-bottom:14px">', unsafe_allow_html=True)
+        st.markdown('<div style="color:#e2e8f0;font-size:15px;font-weight:600;margin-bottom:14px">🎯 Competence (Moore Level 4)</div>', unsafe_allow_html=True)
+        comp_to_show = comp if comp else ev.get('eval_competence', [])
+        if comp_to_show:
+            tbl = '<table style="width:100%;border-collapse:collapse"><thead><tr>'
+            if comp:
+                for h in ['Item','Pre','Post','Δ']:
+                    tbl += f'<th style="color:#94a3b8;font-size:11px;text-transform:uppercase;padding:8px 6px;border-bottom:1px solid #334155;text-align:left">{h}</th>'
+                tbl += '</tr></thead><tbody>'
+                for r in comp:
+                    chg_color = '#4ade80' if r['change'] > 0 else '#f87171'
+                    chg_str = f"+{r['change']}" if r['change'] > 0 else str(r['change'])
+                    tbl += f'<tr><td style="color:#e2e8f0;font-size:12px;padding:9px 6px;border-bottom:1px solid #1e293b" title="{r["label"]}">{short(r["label"],38)}</td><td style="color:#e2e8f0;font-size:12px;padding:9px 6px;border-bottom:1px solid #1e293b">{r["pre_mean"]}</td><td style="color:#e2e8f0;font-size:12px;padding:9px 6px;border-bottom:1px solid #1e293b">{r["post_mean"]}</td><td style="color:{chg_color};font-weight:600;font-size:12px;padding:9px 6px;border-bottom:1px solid #1e293b">{chg_str}</td></tr>'
+            else:
+                for h in ['Learning Objective','Mean','N']:
+                    tbl += f'<th style="color:#94a3b8;font-size:11px;text-transform:uppercase;padding:8px 6px;border-bottom:1px solid #334155;text-align:left">{h}</th>'
+                tbl += '</tr></thead><tbody>'
+                for r in [x for x in comp_to_show if 'participants will be able' not in x['label'].lower()][:5]:
+                    tbl += f'<tr><td style="color:#e2e8f0;font-size:12px;padding:9px 6px;border-bottom:1px solid #1e293b" title="{r["label"]}">{short(r["label"],38)}</td><td style="color:#22d3ee;font-size:12px;padding:9px 6px;border-bottom:1px solid #1e293b">{r["mean"]}/5.0</td><td style="color:#94a3b8;font-size:12px;padding:9px 6px;border-bottom:1px solid #1e293b">{r["n"]}</td></tr>'
+            tbl += '</tbody></table>'
+            st.markdown(tbl, unsafe_allow_html=True)
+        else:
+            st.markdown('<div style="color:#64748b;font-size:13px">No Likert items detected.</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    if ex_file and nx_file:
-        with st.spinner("Parsing Exchange file…"):
-            ex_records = parse_exchange(ex_file.read())
-        with st.spinner("Parsing Nexus file…"):
-            nx_records = parse_nexus(nx_file.read())
+        # Satisfaction
+        sats = ev.get('satisfaction', [])
+        if sats:
+            st.markdown('<div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:20px">', unsafe_allow_html=True)
+            st.markdown('<div style="color:#e2e8f0;font-size:15px;font-weight:600;margin-bottom:14px">⭐ Satisfaction (1–5)</div>', unsafe_allow_html=True)
+            for s in sats[:5]:
+                pf = round((s['mean'] / 5) * 100)
+                st.markdown(f"""
+<div style="display:flex;align-items:center;gap:10px;margin:6px 0">
+  <div style="color:#94a3b8;font-size:12px;width:220px;flex-shrink:0" title="{s['label']}">{short(s['label'],35)}</div>
+  <div style="flex:1;background:#334155;border-radius:4px;height:8px">
+    <div style="width:{pf}%;background:#22d3ee;border-radius:4px;height:8px"></div>
+  </div>
+  <div style="color:#e2e8f0;font-size:12px;width:40px;text-align:right">{s['mean']}</div>
+</div>""", unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
 
-        st.success(f"✅ Exchange: {len(ex_records)} records  |  "
-                   f"Nexus: {len(nx_records)} records  |  "
-                   f"Combined: {len(ex_records) + len(nx_records)} records")
 
-        with st.spinner("Building combined Excel…"):
-            combined_bytes = write_combined_excel(ex_records, nx_records)
+def tab_knowledge(df, kn):
+    st.markdown('<div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:20px;margin-bottom:16px">', unsafe_allow_html=True)
+    st.markdown('<div style="color:#e2e8f0;font-size:15px;font-weight:600;margin-bottom:14px">📚 Knowledge Assessment — MCQ Pre/Post (Moore Level 3)</div>', unsafe_allow_html=True)
+    if not kn:
+        st.markdown('<div style="color:#64748b;padding:20px">No MCQ pre/post pairs detected.</div>', unsafe_allow_html=True)
+    else:
+        tbl = '<table style="width:100%;border-collapse:collapse"><thead><tr>'
+        for h in ['Question','N','Pre %','Post %','Gain','p-value','Ex Pre','Ex Post','Nx Pre','Nx Post']:
+            tbl += f'<th style="color:#94a3b8;font-size:11px;text-transform:uppercase;padding:8px 10px;border-bottom:1px solid #334155;text-align:left">{h}</th>'
+        tbl += '</tr></thead><tbody>'
+        for r in kn:
+            gc = '#4ade80' if r['gain'] and r['gain'] > 0 else '#f87171'
+            gs = f"+{r['gain']}pp" if r['gain'] and r['gain'] > 0 else f"{r['gain']}pp"
+            ps = '<0.001' if r['p_val'] and r['p_val'] < 0.001 else (str(r['p_val']) if r['p_val'] else '—')
+            def f(v): return f"{v}%" if v is not None else '—'
+            tbl += f'<tr style="cursor:pointer" onmouseover="this.style.background=\'#334155\'" onmouseout="this.style.background=\'\'"><td style="color:#e2e8f0;font-size:13px;padding:10px" title="{r["label"]}">{short(r["label"],48)}</td><td style="color:#e2e8f0;font-size:13px;padding:10px">{r["n"]}</td><td style="color:#e2e8f0;font-size:13px;padding:10px">{f(r["pre_pct"])}</td><td style="color:#e2e8f0;font-size:13px;padding:10px">{f(r["post_pct"])}</td><td style="color:{gc};font-weight:600;font-size:13px;padding:10px">{gs}</td><td style="color:#94a3b8;font-size:12px;padding:10px">{ps}</td><td style="color:#a78bfa;font-size:12px;padding:10px">{f(r.get("ex_pre"))}</td><td style="color:#a78bfa;font-size:12px;padding:10px">{f(r.get("ex_post"))}</td><td style="color:#4ade80;font-size:12px;padding:10px">{f(r.get("nx_pre"))}</td><td style="color:#4ade80;font-size:12px;padding:10px">{f(r.get("nx_post"))}</td></tr>'
+        tbl += '</tbody></table>'
+        st.markdown(tbl, unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-        st.download_button(
-            label     = "⬇  Download CME_Combined_Data.xlsx",
-            data      = combined_bytes,
-            file_name = "CME_Combined_Data.xlsx",
-            mime      = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
 
-        # Quick preview
-        df_preview = pd.read_excel(io.BytesIO(combined_bytes), sheet_name='Combined Data',
-                                    header=0, nrows=20)
-        with st.expander("Preview first 20 rows", expanded=False):
-            st.dataframe(df_preview, use_container_width=True)
+def tab_competence(df, comp, ev):
+    st.markdown('<div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:20px;margin-bottom:16px">', unsafe_allow_html=True)
+    st.markdown('<div style="color:#e2e8f0;font-size:15px;font-weight:600;margin-bottom:14px">🎯 Competence — Likert Pre/Post (Moore Level 4)</div>', unsafe_allow_html=True)
+    if comp:
+        tbl = '<table style="width:100%;border-collapse:collapse"><thead><tr>'
+        for h in ['Item','N','Pre Mean','Post Mean','Change','p-value','Ex Pre','Ex Post','Nx Pre','Nx Post']:
+            tbl += f'<th style="color:#94a3b8;font-size:11px;text-transform:uppercase;padding:8px 10px;border-bottom:1px solid #334155;text-align:left">{h}</th>'
+        tbl += '</tr></thead><tbody>'
+        for r in comp:
+            cc = '#4ade80' if r['change'] > 0 else '#f87171'
+            cs = f"+{r['change']}" if r['change'] > 0 else str(r['change'])
+            ps = '<0.001' if r['p_val'] and r['p_val'] < 0.001 else (str(r['p_val']) if r['p_val'] else '—')
+            def fm(v): return str(v) if v is not None else '—'
+            tbl += f'<tr><td style="color:#e2e8f0;font-size:13px;padding:10px" title="{r["label"]}">{short(r["label"],48)}</td><td style="color:#e2e8f0;font-size:13px;padding:10px">{r["n"]}</td><td style="color:#e2e8f0;font-size:13px;padding:10px">{r["pre_mean"]}</td><td style="color:#e2e8f0;font-size:13px;padding:10px">{r["post_mean"]}</td><td style="color:{cc};font-weight:600;font-size:13px;padding:10px">{cs}</td><td style="color:#94a3b8;font-size:12px;padding:10px">{ps}</td><td style="color:#a78bfa;font-size:12px;padding:10px">{fm(r.get("ex_pre"))}</td><td style="color:#a78bfa;font-size:12px;padding:10px">{fm(r.get("ex_post"))}</td><td style="color:#4ade80;font-size:12px;padding:10px">{fm(r.get("nx_pre"))}</td><td style="color:#4ade80;font-size:12px;padding:10px">{fm(r.get("nx_post"))}</td></tr>'
+        tbl += '</tbody></table>'
+        st.markdown(tbl, unsafe_allow_html=True)
+    else:
+        # Show EVAL competence items instead
+        ec = [x for x in ev.get('eval_competence',[]) if 'participants will be able' not in x['label'].lower()]
+        if ec:
+            st.markdown('<div style="color:#94a3b8;font-size:12px;margin-bottom:10px">Post-activity learning objective ratings (1–5 Likert)</div>', unsafe_allow_html=True)
+            for s in ec:
+                pf = round((s['mean'] / 5) * 100)
+                ex_s = f" | Ex: {s['ex_mean']}" if s['ex_mean'] else ''
+                nx_s = f" | Nx: {s['nx_mean']}" if s['nx_mean'] else ''
+                st.markdown(f"""
+<div style="display:flex;align-items:center;gap:10px;margin:8px 0">
+  <div style="color:#94a3b8;font-size:12px;width:360px;flex-shrink:0" title="{s['label']}">{short(s['label'],58)}</div>
+  <div style="flex:1;background:#334155;border-radius:4px;height:8px">
+    <div style="width:{pf}%;background:#a78bfa;border-radius:4px;height:8px"></div>
+  </div>
+  <div style="color:#e2e8f0;font-size:12px;width:100px;text-align:right">{s['mean']}/5.0{ex_s}{nx_s}</div>
+</div>""", unsafe_allow_html=True)
+        else:
+            st.markdown('<div style="color:#64748b">No Likert competence data detected.</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-        with st.expander("Column Map", expanded=False):
-            df_colmap = pd.read_excel(io.BytesIO(combined_bytes), sheet_name='Column Map', header=0)
-            st.dataframe(df_colmap, use_container_width=True)
 
+def tab_evaluation(df, ev):
+    metrics_html = '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:20px">'
+    for lbl, key, color in [
+        ('Intent to Change Practice','intent','#22d3ee'),
+        ('Would Recommend Program','recommend','#4ade80'),
+        ('Bias-Free Content','bias_free','#a78bfa'),
+    ]:
+        m = ev.get(key, {})
+        val = f"{m.get('pct','—')}%" if m.get('pct') is not None else '—'
+        n   = m.get('n','—')
+        ex  = f"{m.get('ex_pct','—')}%" if m.get('ex_pct') is not None else '—'
+        nx  = f"{m.get('nx_pct','—')}%" if m.get('nx_pct') is not None else '—'
+        metrics_html += f"""
+<div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:16px;cursor:pointer">
+  <div style="color:#94a3b8;font-size:11px;text-transform:uppercase;margin-bottom:6px">{lbl}</div>
+  <div style="font-size:36px;font-weight:700;color:{color}">{val}</div>
+  <div style="color:#64748b;font-size:11px;margin-top:4px">n={n} | Ex: {ex} | Nx: {nx}</div>
+</div>"""
+    metrics_html += '</div>'
+    st.markdown(metrics_html, unsafe_allow_html=True)
+
+    cn = ev.get('content_new', {})
+    if cn.get('pct') is not None:
+        st.markdown(f'<div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:16px;margin-bottom:16px"><div style="color:#94a3b8;font-size:11px;text-transform:uppercase;margin-bottom:4px">Content New to Learner</div><div style="font-size:30px;font-weight:700;color:#f59e0b">{cn["pct"]}%</div><div style="color:#64748b;font-size:11px">n={cn.get("n","—")} | Ex: {cn.get("ex_pct","—")}% | Nx: {cn.get("nx_pct","—")}%</div></div>', unsafe_allow_html=True)
+
+    if ev.get('satisfaction'):
+        st.markdown('<div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:20px;margin-bottom:16px">', unsafe_allow_html=True)
+        st.markdown('<div style="color:#e2e8f0;font-size:15px;font-weight:600;margin-bottom:14px">⭐ Satisfaction Ratings (1–5)</div>', unsafe_allow_html=True)
+        for s in ev['satisfaction']:
+            pf = round((s['mean'] / 5) * 100)
+            ex_s = f" Ex:{s['ex_mean']}" if s['ex_mean'] else ''
+            nx_s = f" Nx:{s['nx_mean']}" if s['nx_mean'] else ''
+            st.markdown(f"""
+<div style="display:flex;align-items:center;gap:10px;margin:8px 0">
+  <div style="color:#94a3b8;font-size:12px;width:320px;flex-shrink:0" title="{s['label']}">{short(s['label'],52)}</div>
+  <div style="flex:1;background:#334155;border-radius:4px;height:8px">
+    <div style="width:{pf}%;background:#22d3ee;border-radius:4px;height:8px"></div>
+  </div>
+  <div style="color:#e2e8f0;font-size:12px;width:120px;text-align:right">{s['mean']}/5.0{ex_s}{nx_s}</div>
+</div>""", unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+
+def tab_key_findings(df, kn, comp, ev, summary):
+    st.markdown('<div style="color:#e2e8f0;font-size:18px;font-weight:700;margin-bottom:20px">Key Findings Summary</div>', unsafe_allow_html=True)
+
+    if kn:
+        st.markdown('<div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:20px;margin-bottom:16px">', unsafe_allow_html=True)
+        st.markdown('<div style="color:#e2e8f0;font-size:15px;font-weight:600;margin-bottom:16px">Knowledge Gain — Prior vs. After</div>', unsafe_allow_html=True)
+        html = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:20px">'
+        for r in kn:
+            pre  = r['pre_pct'] or 0
+            post = r['post_pct'] or 0
+            gain = r['gain'] or 0
+            html += f"""
+<div style="text-align:center">
+  <div style="display:flex;gap:10px;justify-content:center;align-items:center;margin-bottom:8px">
+    <div style="width:90px;height:90px;border-radius:50%;border:5px solid #f59e0b;display:flex;align-items:center;justify-content:center;flex-direction:column">
+      <div style="font-size:22px;font-weight:700;color:#f59e0b">{pre}%</div>
+      <div style="font-size:9px;color:#94a3b8">PRE</div>
+    </div>
+    <div style="font-size:18px;color:#64748b">→</div>
+    <div style="width:90px;height:90px;border-radius:50%;border:5px solid #4ade80;display:flex;align-items:center;justify-content:center;flex-direction:column">
+      <div style="font-size:22px;font-weight:700;color:#4ade80">{post}%</div>
+      <div style="font-size:9px;color:#94a3b8">POST</div>
+    </div>
+  </div>
+  <div style="color:#4ade80;font-size:13px;font-weight:700">+{gain}pp gain</div>
+  <div style="color:#94a3b8;font-size:11px;margin-top:4px">{short(r["label"],55)}</div>
+</div>"""
+        st.markdown(html + '</div></div>', unsafe_allow_html=True)
+
+    comp_show = comp if comp else [x for x in ev.get('eval_competence',[]) if 'participants will be able' not in x['label'].lower()]
+    if comp_show:
+        st.markdown('<div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:20px;margin-bottom:16px">', unsafe_allow_html=True)
+        st.markdown('<div style="color:#e2e8f0;font-size:15px;font-weight:600;margin-bottom:16px">Competence Shift</div>', unsafe_allow_html=True)
+        html = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:20px">'
+        for r in comp_show[:6]:
+            if 'pre_mean' in r:
+                pre_v, post_v = r['pre_mean'], r['post_mean']
+                chg_txt = f"+{r['change']}" if r['change'] >= 0 else str(r['change'])
+                html += f"""
+<div style="text-align:center">
+  <div style="display:flex;gap:10px;justify-content:center;align-items:center;margin-bottom:8px">
+    <div style="width:80px;height:80px;border-radius:50%;border:4px solid #a78bfa;display:flex;align-items:center;justify-content:center;flex-direction:column">
+      <div style="font-size:20px;font-weight:700;color:#a78bfa">{pre_v}</div>
+      <div style="font-size:9px;color:#94a3b8">PRE</div>
+    </div>
+    <div style="font-size:14px;color:#64748b">→</div>
+    <div style="width:80px;height:80px;border-radius:50%;border:4px solid #22d3ee;display:flex;align-items:center;justify-content:center;flex-direction:column">
+      <div style="font-size:20px;font-weight:700;color:#22d3ee">{post_v}</div>
+      <div style="font-size:9px;color:#94a3b8">POST</div>
+    </div>
+  </div>
+  <div style="color:#22d3ee;font-size:13px;font-weight:700">{chg_txt} Likert pts</div>
+  <div style="color:#94a3b8;font-size:11px;margin-top:4px">{short(r["label"],55)}</div>
+</div>"""
+            else:
+                pf = round((r['mean']/5)*100)
+                html += f"""
+<div style="text-align:center">
+  <div style="width:100px;height:100px;border-radius:50%;border:5px solid #a78bfa;display:flex;align-items:center;justify-content:center;flex-direction:column;margin:0 auto 8px">
+    <div style="font-size:24px;font-weight:700;color:#a78bfa">{r["mean"]}</div>
+    <div style="font-size:9px;color:#94a3b8">/5.0</div>
+  </div>
+  <div style="color:#94a3b8;font-size:11px">{short(r["label"],55)}</div>
+</div>"""
+        html += '</div></div>'
+        st.markdown(html, unsafe_allow_html=True)
+
+    html = '<div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:20px;margin-bottom:16px"><div style="color:#e2e8f0;font-size:15px;font-weight:600;margin-bottom:16px">Evaluation Highlights</div><div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px">'
+    for lbl, key, color in [('Intent to Change','intent','#22d3ee'),('Would Recommend','recommend','#4ade80'),('Bias-Free','bias_free','#a78bfa')]:
+        val = ev.get(key,{}).get('pct')
+        vs  = f"{val}%" if val is not None else '—'
+        html += f"""
+<div style="text-align:center">
+  <div style="width:110px;height:110px;border-radius:50%;border:6px solid {color};display:flex;align-items:center;justify-content:center;flex-direction:column;margin:0 auto 8px">
+    <div style="font-size:28px;font-weight:800;color:{color}">{vs}</div>
+  </div>
+  <div style="color:#94a3b8;font-size:12px">{lbl}</div>
+</div>"""
+    html += '</div></div>'
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def tab_kirkpatrick(df, kn, comp, ev, summary):
+    levels = [
+        ('Level 1','Reaction','#22d3ee','😊','Did learners find the activity relevant?'),
+        ('Level 2','Learning','#4ade80','📚','Did learners gain knowledge/competence?'),
+        ('Level 3','Behavior','#a78bfa','🔄','Did learners intend to change practice?'),
+        ('Level 4','Results', '#f59e0b','🎯','Did the activity impact patient care?'),
+    ]
+    for lv, title, color, icon, desc in levels:
+        st.markdown(f'<div style="background:#1e293b;border-left:4px solid {color};border-radius:0 8px 8px 0;padding:16px;margin-bottom:12px">', unsafe_allow_html=True)
+        st.markdown(f'<div style="color:{color};font-size:13px;font-weight:700;margin-bottom:6px">{icon} {lv}: {title}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="color:#94a3b8;font-size:12px;margin-bottom:10px">{desc}</div>', unsafe_allow_html=True)
+        if lv == 'Level 1':
+            for s in ev.get('satisfaction',[])[:5]:
+                pf = round((s['mean']/5)*100)
+                st.markdown(f'<div style="display:flex;align-items:center;gap:10px;margin:5px 0"><div style="color:#94a3b8;font-size:12px;width:300px;flex-shrink:0">{short(s["label"],48)}</div><div style="flex:1;background:#334155;border-radius:4px;height:8px"><div style="width:{pf}%;background:{color};border-radius:4px;height:8px"></div></div><div style="color:#e2e8f0;font-size:12px;width:50px;text-align:right">{s["mean"]}/5</div></div>', unsafe_allow_html=True)
+        elif lv == 'Level 2':
+            avg = round(sum(r['gain'] for r in kn if r['gain'])/max(1,len(kn)),1) if kn else 0
+            st.markdown(f'<div style="color:{color};font-size:20px;font-weight:700;margin-bottom:8px">{len(kn)} MCQ Questions | Avg +{avg}pp gain</div>', unsafe_allow_html=True)
+            for r in kn:
+                pf = min(100, max(0, int((r['gain'] or 0) * 2)))
+                st.markdown(f'<div style="display:flex;align-items:center;gap:10px;margin:5px 0"><div style="color:#94a3b8;font-size:12px;width:300px;flex-shrink:0">{short(r["label"],48)}</div><div style="flex:1;background:#334155;border-radius:4px;height:8px"><div style="width:{pf}%;background:{color};border-radius:4px;height:8px"></div></div><div style="color:#e2e8f0;font-size:12px;width:60px;text-align:right">+{r["gain"]}pp</div></div>', unsafe_allow_html=True)
+        elif lv == 'Level 3':
+            ip = ev.get('intent',{}).get('pct')
+            if ip:
+                st.markdown(f'<div style="display:flex;align-items:center;gap:10px;margin:5px 0"><div style="color:#94a3b8;font-size:12px;width:300px;flex-shrink:0">Intend to change practice</div><div style="flex:1;background:#334155;border-radius:4px;height:8px"><div style="width:{ip}%;background:{color};border-radius:4px;height:8px"></div></div><div style="color:#e2e8f0;font-size:12px;width:50px;text-align:right">{ip}%</div></div>', unsafe_allow_html=True)
+        elif lv == 'Level 4':
+            fu_cols = [c for c in df.columns if c.startswith('FU__')]
+            if fu_cols:
+                did = next((c for c in fu_cols if 'change' in c.lower()), None)
+                if did:
+                    vals = df[did].dropna().astype(str)
+                    yp = pct(vals.str.lower().str.startswith('yes').sum(), len(vals))
+                    st.markdown(f'<div style="color:{color};font-size:18px;font-weight:700">Confirmed Practice Change: {yp}% (n={len(vals)})</div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div style="color:#64748b;font-size:13px">Follow-up data not available in this dataset.</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+
+def tab_circle(df, kn, comp, ev, summary):
+    st.markdown('<div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:20px;margin-bottom:16px">', unsafe_allow_html=True)
+    st.markdown('<div style="color:#e2e8f0;font-size:15px;font-weight:600;margin-bottom:6px">CIRCLE Framework — CE/CPD Outcomes</div>', unsafe_allow_html=True)
+    st.markdown('<div style="color:#94a3b8;font-size:12px;margin-bottom:16px">Competence · Impact · Relevance · Change · Learning · Engagement</div>', unsafe_allow_html=True)
+
+    comp_show = comp if comp else ev.get('eval_competence', [])
+    c_val = round(float(sum(r.get('post_mean', r.get('mean',0)) for r in comp_show) / max(1,len(comp_show)) / 5 * 100), 1) if comp_show else 0
+    i_val = ev.get('intent',{}).get('pct') or 0
+    sats  = ev.get('satisfaction',[])
+    r_val = round(float(sum(s['mean'] for s in sats)/max(1,len(sats))/5*100),1) if sats else 0
+    ch_val = ev.get('recommend',{}).get('pct') or 0
+    l_val  = round(float(sum(r['post_pct'] for r in kn if r['post_pct'])/max(1,len(kn))),1) if kn else 0
+    e_val  = summary.get('match_pct') or 0
+
+    for lbl, val, color, desc in [
+        ('C — Competence', c_val, '#22d3ee', f"Post-training competence across {len(comp_show)} items"),
+        ('I — Impact',     i_val, '#4ade80', 'Intent to change clinical practice'),
+        ('R — Relevance',  r_val, '#a78bfa', f"Activity satisfaction ({len(sats)} items, 1–5 scale)"),
+        ('C — Change',     ch_val,'#f59e0b', 'Would recommend program to colleague'),
+        ('L — Learning',   l_val, '#60a5fa', f"Post-test knowledge accuracy ({len(kn)} MCQ questions)"),
+        ('E — Engagement', e_val, '#fb923c', 'Pre/post completion rate'),
+    ]:
+        pf = min(100, max(0, int(val)))
+        st.markdown(f"""
+<div style="margin-bottom:14px">
+  <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+    <div style="color:#e2e8f0;font-size:13px;font-weight:600">{lbl}</div>
+    <div style="color:{color};font-size:13px;font-weight:700">{val}%</div>
+  </div>
+  <div style="background:#334155;border-radius:4px;height:10px">
+    <div style="width:{pf}%;background:{color};border-radius:4px;height:10px"></div>
+  </div>
+  <div style="color:#64748b;font-size:11px;margin-top:3px">{desc}</div>
+</div>""", unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+def tab_jcehp(df, kn, comp, ev, summary, prog_name):
+    sections = ['Abstract','Introduction','Methods','Results','Discussion','Conclusion']
+    existing = st.session_state.get('jcehp_text', {})
+    filled = [s for s in sections if existing.get(s)]
+    pct_done = round(len(filled)/len(sections)*100)
+
+    st.markdown(f'<div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:16px;margin-bottom:16px"><div style="color:#e2e8f0;font-size:15px;font-weight:600;margin-bottom:8px">📝 JCEHP Article Preparation</div><div style="color:#94a3b8;font-size:12px;margin-bottom:8px">{pct_done}% complete ({len(filled)}/{len(sections)} sections)</div><div style="background:#334155;border-radius:6px;height:8px"><div style="width:{pct_done}%;background:#22d3ee;border-radius:6px;height:8px"></div></div></div>', unsafe_allow_html=True)
+
+    kn_txt = ' '.join([f"Knowledge of {short(r['label'],50)}: pre {r['pre_pct']}% vs post {r['post_pct']}% (Δ={r['gain']}pp)." for r in kn])
+    intent = ev.get('intent',{}).get('pct')
+    rec    = ev.get('recommend',{}).get('pct')
+
+    auto = {
+        'Abstract':  f"Background: Educational programming addressing {prog_name or 'clinical practice gaps'} is needed to support clinician competence. Methods: A multi-vendor CME activity (Exchange + Nexus, N={summary.get('total',0)}) was analyzed for outcomes. Results: {kn_txt[:200]} Discussion: Findings support meaningful educational impact.",
+        'Methods':   f"This outcomes analysis included {summary.get('total',0)} learners across Exchange (n={summary.get('ex_total',0)}) and Nexus (n={summary.get('nx_total',0)}) vendors. Pre/post matched analysis included {summary.get('matched',0)} learners ({summary.get('match_pct',0)}% completion). Evaluation survey data was available for {summary.get('with_eval',0)} participants.",
+        'Results':   f"Knowledge outcomes: {kn_txt}\n\nEvaluation: {f'{intent}% of respondents indicated intent to change practice. ' if intent else ''}{f'{rec}% would recommend this program.' if rec else ''}",
+    }
+
+    for sec in sections:
+        content = existing.get(sec, auto.get(sec, ''))
+        st.markdown(f'<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:16px;margin-bottom:10px"><div style="color:#a78bfa;font-size:13px;font-weight:700;margin-bottom:8px">{sec}</div>', unsafe_allow_html=True)
+        new_text = st.text_area(sec, value=content, height=110, key=f'jcehp_{sec}', label_visibility='collapsed')
+        if new_text != content:
+            st.session_state.setdefault('jcehp_text', {})[sec] = new_text
+        st.markdown('</div>', unsafe_allow_html=True)
+
+
+def tab_ai_insights(df, kn, comp, ev, summary):
+    st.markdown('<div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:20px">', unsafe_allow_html=True)
+    st.markdown('<div style="color:#e2e8f0;font-size:15px;font-weight:600;margin-bottom:14px">🤖 AI Insights</div>', unsafe_allow_html=True)
+
+    api_key = st.text_input("Anthropic API Key", type="password",
+                            value=st.session_state.get('api_key',''),
+                            placeholder="sk-ant-...")
+    if api_key: st.session_state['api_key'] = api_key
+
+    if st.button("Generate AI Insights"):
+        if not api_key:
+            st.error("Please enter your Anthropic API key.")
+        else:
+            with st.spinner("Generating insights…"):
+                kn_s   = "\n".join([f"- {r['label'][:60]}: pre={r['pre_pct']}% post={r['post_pct']}% gain={r['gain']}pp" for r in kn]) or "No MCQ data"
+                comp_s = "\n".join([f"- {r['label'][:60]}: pre={r['pre_mean']} post={r['post_mean']} chg={r['change']}" for r in comp]) or "No Likert data"
+                prompt = f"""You are a CME outcomes analyst. Generate 5 actionable insights for medical education QI.
+
+Program: {st.session_state.get('prog_name','CME Activity')}
+Learners: {summary.get('total',0)} (Exchange:{summary.get('ex_total',0)}, Nexus:{summary.get('nx_total',0)})
+Matched: {summary.get('matched',0)} ({summary.get('match_pct','—')}%)
+
+KNOWLEDGE:\n{kn_s}
+COMPETENCE:\n{comp_s}
+Intent to change: {ev.get('intent',{}).get('pct','N/A')}%
+Would recommend: {ev.get('recommend',{}).get('pct','N/A')}%
+
+Return JSON array of 5 objects: title, moore_level (2/3/4/5), insight, recommendation"""
+                try:
+                    import requests as _req
+                    resp = _req.post("https://api.anthropic.com/v1/messages",
+                        headers={"x-api-key": api_key, "anthropic-version":"2023-06-01","content-type":"application/json"},
+                        json={"model":"claude-sonnet-4-20250514","max_tokens":1500,
+                              "messages":[{"role":"user","content":prompt}]}, timeout=30)
+                    if resp.status_code == 200:
+                        text = resp.json()['content'][0]['text']
+                        m = re.search(r'\[.*\]', text, re.DOTALL)
+                        if m: st.session_state['ai_insights'] = json.loads(m.group())
+                    else:
+                        st.error(f"API error {resp.status_code}: {resp.text[:200]}")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+    for ins in st.session_state.get('ai_insights',[]):
+        lvl = str(ins.get('moore_level',''))
+        colors = {'2':'#f59e0b','3':'#4ade80','4':'#22d3ee','5':'#a78bfa'}
+        c = colors.get(lvl,'#64748b')
+        st.markdown(f'<div style="background:#0f172a;border:1px solid #334155;border-radius:10px;padding:18px;margin-bottom:12px"><div style="display:flex;align-items:center;gap:10px;margin-bottom:8px"><span style="background:{c}22;border:1px solid {c};color:{c};padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700">MOORE LEVEL {lvl}</span><div style="color:#e2e8f0;font-size:14px;font-weight:600">{ins.get("title","")}</div></div><div style="color:#94a3b8;font-size:13px;line-height:1.5">{ins.get("insight","")}</div><div style="color:#4ade80;font-size:12px;margin-top:8px">→ {ins.get("recommendation","")}</div></div>', unsafe_allow_html=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 8 — TAB 2: ANALYZER
+# UPLOAD SCREEN
 # ══════════════════════════════════════════════════════════════════════════════
-
-def render_analyzer():
-    st.subheader("Upload Combined Data")
-    combo_file = st.file_uploader("Upload CME_Combined_Data.xlsx", type=['xlsx', 'xls'],
-                                   key='combo_upload', label_visibility='collapsed')
-    if not combo_file:
-        st.info("Upload the combined Excel file produced by the Merger tab to begin.")
-        return
-
-    with st.spinner("Loading data…"):
-        df, section_lookup = load_combined(combo_file.read())
-
-    pre_cols, post_cols, eval_cols, meta_cols = classify_cols(df, section_lookup)
-
-    # ── SIDEBAR FILTERS ──
-    with st.sidebar:
-        st.markdown("## 🔽 Filters")
-        st.markdown("---")
-
-        # Vendor filter
-        st.markdown("**Data Source**")
-        vendors_available = sorted(df['_source'].dropna().unique().tolist()) if '_source' in df.columns else []
-        vendor_sel = st.multiselect("Vendor", vendors_available, default=vendors_available, key="vendor_filter")
-
-        # Profession filter
-        prof_col = next((c for c in df.columns if 'i am a' in c.lower()), None) or                    next((c for c in df.columns if 'credential' in c.lower()), None)
-        prof_sel = []
-        if prof_col:
-            st.markdown("**Profession / Credential**")
-            prof_vals = sorted(df[prof_col].dropna().unique().tolist())
-            prof_sel = st.multiselect("Profession", prof_vals, default=prof_vals, key="prof_filter")
-
-        # Specialty filter
-        spec_col = next((c for c in df.columns if c.lower().startswith('specialty')), None)
-        spec_sel = []
-        if spec_col:
-            st.markdown("**Specialty**")
-            spec_vals = sorted(df[spec_col].dropna().unique().tolist())
-            spec_sel = st.multiselect("Specialty", spec_vals, default=spec_vals, key="spec_filter")
-
-        st.markdown("---")
-        if st.button("Reset All Filters"):
-            st.rerun()
-
-    # Apply filters
-    df_filt = df.copy()
-    if vendor_sel and '_source' in df.columns:
-        df_filt = df_filt[df_filt['_source'].isin(vendor_sel)]
-    if prof_sel and prof_col:
-        df_filt = df_filt[df_filt[prof_col].isin(prof_sel)]
-    if spec_sel and spec_col:
-        df_filt = df_filt[df_filt[spec_col].isin(spec_sel)]
-
-    # Use filtered df everywhere
-    df = df_filt
-
-    # Filter badge display
-    active_filters = []
-    if vendor_sel and len(vendor_sel) < len(vendors_available):
-        active_filters.append(f"Vendor: {', '.join(vendor_sel)}")
-    if prof_sel and prof_col and len(prof_sel) < len(df[prof_col].dropna().unique() if prof_col else []):
-        active_filters.append(f"Profession: {len(prof_sel)} selected")
-    if spec_sel and spec_col and len(spec_sel) < len(df[spec_col].dropna().unique() if spec_col else []):
-        active_filters.append(f"Specialty: {len(spec_sel)} selected")
-    if active_filters:
-        st.info(f"🔽 Active filters: {' | '.join(active_filters)} — showing {len(df):,} of {len(df_filt):,} records")
-
-    # ── Overview cards ──
-    total_n   = len(df)
-    has_post  = int(df['_has_post'].apply(lambda v: str(v).strip().lower() in ('true', 'yes', '1')).sum()) \
-                if '_has_post' in df.columns else 0
-    has_eval  = int(df['_has_eval'].apply(lambda v: str(v).strip().lower() in ('true', 'yes', '1')).sum()) \
-                if '_has_eval' in df.columns else 0
-    has_fu    = int(df['_has_followup'].apply(lambda v: str(v).strip().lower() in ('true', 'yes', '1')).sum()) \
-                if '_has_followup' in df.columns else 0
-    pre_only  = total_n - has_post
-
-    ex_n = int((df['_source'] == 'Exchange').sum()) if '_source' in df.columns else 0
-    nx_n = int((df['_source'] == 'Nexus').sum())    if '_source' in df.columns else 0
-
-    st.markdown("### Overview")
-    c1, c2, c3, c4, c5 = st.columns(5)
-    with c1: metric_card("Total Learners",     total_n,
-                          info="All records across Exchange and Nexus")
-    with c2: metric_card("Pre-Only",           pre_only,
-                          info="Completed pre-test but no post-test")
-    with c3: metric_card("Pre+Post Matched",   has_post,
-                          info="Completed both pre- and post-test")
-    with c4: metric_card("With Evaluation",    has_eval,
-                          info="Completed evaluation survey")
-    with c5: metric_card("Follow-Up",          has_fu,
-                          info="Completed follow-up survey")
-
-    st.caption(f"Exchange: {ex_n}  |  Nexus: {nx_n}  |  "
-               f"Pre cols: {len(pre_cols)}  |  Post cols: {len(post_cols)}  |  "
-               f"Eval cols: {len(eval_cols)}")
-
-    # ── Key Insights Panel ──
-    ev_ov = compute_evaluation(df, eval_cols)
-    kn_ov = compute_knowledge(df, pre_cols, post_cols)
-
-    st.markdown("### 📈 Key Insights")
-    
-    # Donut charts row
-    d1, d2, d3, d4 = st.columns(4)
-    with d1:
-        intent_m = ev_ov.get('intent', {})
-        st.markdown(donut_metric("Intent to Change",
-            intent_m.get('pct'), "#3b82f6", intent_m.get('n')), unsafe_allow_html=True)
-    with d2:
-        rec_m = ev_ov.get('recommend', {})
-        st.markdown(donut_metric("Would Recommend",
-            rec_m.get('pct'), "#22c55e", rec_m.get('n')), unsafe_allow_html=True)
-    with d3:
-        bias_m = ev_ov.get('bias_free', {})
-        st.markdown(donut_metric("Bias-Free",
-            bias_m.get('pct'), "#a855f7", bias_m.get('n')), unsafe_allow_html=True)
-    with d4:
-        new_m = ev_ov.get('content_new', {})
-        st.markdown(donut_metric("Content Was New",
-            new_m.get('pct'), "#f59e0b", new_m.get('n')), unsafe_allow_html=True)
-
-    # Knowledge gains progress bars
-    if kn_ov:
-        st.markdown("**Knowledge Gains**")
-        for r in sorted(kn_ov, key=lambda x: x['gain'] or 0, reverse=True):
-            if r['pre_pct'] is not None and r['post_pct'] is not None:
-                col_a, col_b = st.columns([3, 1])
-                with col_a:
-                    st.markdown(
-                        progress_bar_html(r['post_pct'], "#3b82f6",
-                                          f"{r['label'][:55]}") +
-                        progress_bar_html(r['pre_pct'], "#64748b", "Pre-test"),
-                        unsafe_allow_html=True)
-                with col_b:
-                    gain = r['gain']
-                    color = "#22c55e" if gain and gain > 0 else "#ef4444"
-                    st.markdown(f"""
-<div style="text-align:center;padding:8px;background:#1e293b;
-            border-radius:10px;margin-top:4px">
-  <div style="font-size:10px;color:#64748b">GAIN</div>
-  <div style="font-size:20px;font-weight:800;color:{color}">
-    {"+" if gain and gain > 0 else ""}{gain}pp</div>
+def render_upload_screen():
+    st.markdown("""
+<div style="padding:60px 32px;text-align:center">
+  <div style="font-size:52px;margin-bottom:16px">🧬</div>
+  <div style="color:#e2e8f0;font-size:26px;font-weight:700;margin-bottom:8px">Integritas CME Outcomes Harmonizer</div>
+  <div style="color:#64748b;font-size:15px;margin-bottom:40px">Upload Exchange and Nexus vendor files to begin analysis</div>
 </div>""", unsafe_allow_html=True)
 
-    # Satisfaction progress bars
-    sat_items = ev_ov.get('satisfaction', [])
-    if sat_items:
-        st.markdown("**Satisfaction**")
-        colors = ["#3b82f6","#22c55e","#a855f7","#f59e0b","#ef4444","#06b6d4","#ec4899","#84cc16"]
-        sat_html = ""
-        for i, s in enumerate(sorted(sat_items, key=lambda x: x['pct'] or 0, reverse=True)):
-            sat_html += progress_bar_html(s['pct'], colors[i % len(colors)],
-                                          s['label'][:60])
-        st.markdown(sat_html, unsafe_allow_html=True)
-
-    st.markdown("---")
-
-    # ── Tabs ──
-    tabs = st.tabs(["📊 Knowledge", "🎯 Competence", "📋 Evaluation",
-                    "📈 Satisfaction", "🔄 Behavior / Barriers",
-                    "🏆 Kirkpatrick", "⭕ CIRCLE", "🤖 AI Insights", "📝 JCEHP Article"])
-
-    # ─── Knowledge tab ───────────────────────────────────────────────────────
-    with tabs[0]:
-        st.markdown("#### Knowledge Gain (MCQ % Correct)")
-        kn_results = compute_knowledge(df, pre_cols, post_cols)
-
-        if not kn_results:
-            st.warning(
-                "No MCQ questions detected. \n\n"
-                "**Debug info:**\n"
-                f"- PRE cols found: {len(pre_cols)}\n"
-                f"- POST cols found: {len(post_cols)}\n"
-                f"- PRE col names: {[c[:60] for c in pre_cols[:5]]}\n"
-                f"- POST col names: {[c[:60] for c in post_cols[:5]]}"
-            )
-        else:
-            for r in sorted(kn_results, key=lambda x: (x['gain'] or -999), reverse=True):
-                post_str = f"{r['post_pct']}%" if r['post_pct'] is not None else "—"
-                p = r['p_val']
-                p_str = "p<0.001 ✓" if p and p < 0.001 else (f"p<0.05 ✓" if p and p < 0.05 else (f"p={p:.3f}" if p else "NS"))
-                with st.expander(f"{r['label'][:70]} — Pre: {r['pre_pct']}%  →  Post: {post_str}  ({p_str})"):
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Pre % Correct",  f"{r['pre_pct']}%",   f"n={r['pre_n']}")
-                    c2.metric("Post % Correct", f"{r['post_pct']}%" if r['post_pct'] else "—",
-                               f"n={r['post_n']}")
-                    c3.metric("Gain", f"{r['gain']:+.1f}pp" if r['gain'] is not None else "—")
-
-                    defn_kn = METRIC_DEFINITIONS['knowledge']
-                    st.markdown(f"**Definition:** {defn_kn['definition']}")
-                    if r.get('inferred'):
-                        st.warning("⚠ Correct answer inferred from most common post-test response — verify accuracy")
-                    st.markdown(f"**Correct answer:** `{r['correct']}`")
-                    st.code(defn_kn['formula'], language=None)
-                    st.markdown(f"**Moore's Level:** `{defn_kn['moore_level']}`")
-                    st.markdown(f"**Statistical significance:** {pval_badge(r['p_val'])}", unsafe_allow_html=True)
-                    st.markdown("**Source Breakdown:**")
-                    src_html = ""
-                    for src in ['Exchange', 'Nexus', 'Combined']:
-                        sub = df if src == 'Combined' else df[df['_source'] == src] if '_source' in df.columns else df
-                        res_pre  = pct_correct(sub[r['pre_col']], r['correct']) if r['pre_col'] else None
-                        res_post = pct_correct(sub[r['post_col']], r['correct']) \
-                                   if r['post_col'] and r['post_col'] in sub.columns else None
-                        pre_pct  = res_pre[0]  if res_pre  else None
-                        post_pct = res_post[0] if res_post else None
-                        src_html += f"<div style='margin:8px 0'><b>{src}</b> (n={len(sub)})</div>"
-                        src_html += progress_bar_html(pre_pct,  "#64748b", "Pre-test")
-                        src_html += progress_bar_html(post_pct, "#3b82f6", "Post-test")
-                    st.markdown(src_html, unsafe_allow_html=True)
-
-    # ─── Competence tab ──────────────────────────────────────────────────────
-    with tabs[1]:
-        st.markdown("#### Competence / Confidence Shifts (Likert)")
-        comp_results = compute_competence(df, pre_cols, post_cols)
-
-        if not comp_results:
-            st.warning("No Likert questions detected in PRE/POST columns.")
-        else:
-            for r in sorted(comp_results,
-                             key=lambda x: (x['delta_pct4'] or -999), reverse=True):
-                p = r['p_val']
-                p_str = "p<0.001" if p and p < 0.001 else (f"p<0.05" if p and p < 0.05 else (f"p={p:.3f}" if p else "NS"))
-                post_mean_str = str(r['post_mean']) if r['post_mean'] is not None else "—"
-                with st.expander(f"{r['label'][:70]} — Pre: {r['pre_mean']}  → Post: {post_mean_str}  ({p_str}):"):
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Pre Mean",  r['pre_mean'])
-                    c2.metric("Post Mean", r['post_mean'] or "—")
-                    c3.metric("Δ Mean",    f"{r['delta_mean']:+.2f}" if r['delta_mean'] else "—")
-                    c4.metric("Post % ≥4", f"{r['post_pct4']}%" if r['post_pct4'] is not None else "—",
-                               delta=f"{r['delta_pct4']:+.1f}pp" if r['delta_pct4'] is not None else None)
-
-                    defn_txt = METRIC_DEFINITIONS['competence']
-                    st.markdown(f"**Definition:** {defn_txt['definition']}")
-                    st.code(defn_txt['formula'], language=None)
-                    st.markdown(f"**Moore's Level:** `{defn_txt['moore_level']}`")
-                    st.markdown(f"**Statistical significance (t-test):** {pval_badge(r['p_val'])}", unsafe_allow_html=True)
-
-                    # Visual source breakdown
-                    st.markdown("**Source Breakdown:**")
-                    src_html = ""
-                    for src in ['Exchange', 'Nexus', 'Combined']:
-                        sub = df if src == 'Combined' else df[df['_source'] == src] if '_source' in df.columns else df
-                        if r['pre_col'] not in sub.columns: continue
-                        ps = [to_likert(v) for v in sub[r['pre_col']].dropna() if to_likert(v) is not None]
-                        post_scores = []
-                        if r['post_col'] and r['post_col'] in sub.columns:
-                            post_scores = [to_likert(v) for v in sub[r['post_col']].dropna() if to_likert(v) is not None]
-                        pre_pct4  = round(100*sum(1 for s in ps if s>=4)/len(ps),1) if ps else None
-                        post_pct4 = round(100*sum(1 for s in post_scores if s>=4)/len(post_scores),1) if post_scores else None
-                        src_html += f"<div style='margin:8px 0'><b>{src}</b> (n={len(sub)})</div>"
-                        src_html += progress_bar_html(pre_pct4,  "#64748b", f"Pre % ≥4 (mean={round(sum(ps)/len(ps),2) if ps else '—'})")
-                        src_html += progress_bar_html(post_pct4, "#3b82f6", f"Post % ≥4")
-                    st.markdown(src_html, unsafe_allow_html=True)
-
-    # ─── Evaluation tab ──────────────────────────────────────────────────────
-    with tabs[2]:
-        st.markdown("#### Evaluation Metrics")
-        ev = compute_evaluation(df, eval_cols)
-
-        # Donut row
-        d1, d2, d3, d4 = st.columns(4)
-        ev_items = [
-            ('intent',      d1, "#3b82f6"),
-            ('recommend',   d2, "#22c55e"),
-            ('bias_free',   d3, "#a855f7"),
-            ('content_new', d4, "#f59e0b"),
-        ]
-        ev_labels = {
-            'intent': 'Intent to Change',
-            'recommend': 'Would Recommend',
-            'bias_free': 'Bias-Free',
-            'content_new': 'Content Was New',
-        }
-        for mk, col, color in ev_items:
-            m = ev.get(mk, {})
-            with col:
-                st.markdown(donut_metric(ev_labels[mk], m.get('pct'), color, m.get('n')),
-                            unsafe_allow_html=True)
-
-        # Progress bars with source breakdown
-        st.markdown("---")
-        for mk, _, color in ev_items:
-            m = ev.get(mk, {})
-            if not m.get('col'): continue
-            st.markdown(f"**{ev_labels[mk]}**")
-            # Source breakdown bars
-            src_html = ""
-            for src in ['Exchange', 'Nexus', 'Combined']:
-                sub = df if src == 'Combined' else df[df['_source'] == src] if '_source' in df.columns else df
-                if mk == 'content_new':
-                    pct, n = avg_pct_new(sub[m['col']])
-                else:
-                    pct, n = pct_yes(sub[m['col']])
-                src_html += progress_bar_html(pct, color, f"{src} (n={n})")
-            st.markdown(src_html, unsafe_allow_html=True)
-            show_metric_popup(mk, df, m.get('col'),
-                              extra_stats={'Overall': f"{m.get('pct')}% (n={m.get('n')})"})
-            st.markdown("")
-
-    # ─── Satisfaction tab ────────────────────────────────────────────────────
-    with tabs[3]:
-        st.markdown("#### Satisfaction (% Agree / Strongly Agree)")
-        ev = compute_evaluation(df, eval_cols)
-        sat_items = ev.get('satisfaction', [])
-
-        if not sat_items:
-            st.info("No satisfaction items detected via keyword matching.")
-            with st.expander("All EVAL columns (debug)"):
-                for ec in eval_cols:
-                    st.code(ec)
-        else:
-            colors_sat = ["#3b82f6","#22c55e","#a855f7","#f59e0b","#ef4444","#06b6d4","#ec4899","#84cc16"]
-            for i, item in enumerate(sorted(sat_items, key=lambda x: x['pct'] or 0, reverse=True)):
-                color = colors_sat[i % len(colors_sat)]
-                st.markdown(progress_bar_html(item['pct'], color, item['label'][:65]),
-                            unsafe_allow_html=True)
-                show_metric_popup('satisfaction', df, item['col'],
-                                  extra_stats={'% Agree/SA': f"{item['pct']}% (n={item['n']})"})
-
-    # ─── Behavior / Barriers tab ─────────────────────────────────────────────
-    with tabs[4]:
-        ev = compute_evaluation(df, eval_cols)
-
-        col_beh, col_bar = st.columns(2)
-        with col_beh:
-            st.markdown("#### Behavior Change")
-            bc = ev.get('behavior_change', {})
-            if bc:
-                for item, cnt in sorted(bc.items(), key=lambda x: x[1], reverse=True):
-                    st.markdown(f"**{cnt}** — {str(item)[:80]}")
-            else:
-                st.info("No behavior change data found.")
-
-        with col_bar:
-            st.markdown("#### Barriers")
-            for btype in ['patient', 'provider', 'system']:
-                barriers = ev.get(f'barrier_{btype}', {})
-                if barriers:
-                    st.markdown(f"**{btype.title()} barriers:**")
-                    for item, cnt in sorted(barriers.items(), key=lambda x: x[1], reverse=True)[:5]:
-                        st.markdown(f"  {cnt} — {str(item)[:60]}")
-
-        st.markdown("#### Follow-Up")
-        metric_card("Follow-Up Respondents", ev.get('followup_n', 0),
-                     info="Completed follow-up survey")
-
-    # ─── Kirkpatrick tab ─────────────────────────────────────────────────────
-    with tabs[5]:
-        st.markdown("#### Kirkpatrick Model of Learning Evaluation")
-        st.caption("Four levels measuring the effectiveness of this CME program")
-        ev_k = compute_evaluation(df, eval_cols)
-        kn_k = compute_knowledge(df, pre_cols, post_cols)
-        comp_k = compute_competence(df, pre_cols, post_cols)
-
-        # Level 1 — Reaction
-        sat_items = ev_k.get('satisfaction', [])
-        avg_sat = round(sum(s['pct'] for s in sat_items) / len(sat_items), 1) if sat_items else None
-        with st.expander("**Level 1 — Reaction** (Learner Satisfaction)", expanded=True):
-            st.markdown("*Did learners find the program engaging and relevant?*")
-            if avg_sat:
-                st.metric("Average Satisfaction", f"{avg_sat}%", help="Avg % Agree/Strongly Agree across satisfaction items")
-                for s in sat_items:
-                    st.markdown(f"- {s['label'][:65]}: **{s['pct']}%** (n={s['n']})")
-            else:
-                st.info("No satisfaction data available.")
-
-        # Level 2 — Learning
-        with st.expander("**Level 2 — Learning** (Knowledge & Competence Gains)", expanded=True):
-            st.markdown("*Did learners acquire new knowledge and skills?*")
-            c1, c2 = st.columns(2)
-            with c1:
-                st.markdown("**Knowledge (MCQ)**")
-                if kn_k:
-                    for r in kn_k:
-                        gain_str = f"+{r['gain']}pp" if r['gain'] else "—"
-                        st.markdown(f"- {r['label'][:50]}: **{gain_str}**")
-                else:
-                    st.info("No MCQ data.")
-            with c2:
-                st.markdown("**Competence (Likert)**")
-                if comp_k:
-                    for r in comp_k:
-                        delta = f"+{r['delta_mean']}" if r['delta_mean'] else "—"
-                        st.markdown(f"- {r['label'][:50]}: **{delta}** mean shift")
-                else:
-                    st.info("No Likert data.")
-
-        # Level 3 — Behavior
-        intent_pct = ev_k.get('intent', {}).get('pct')
-        intent_n   = ev_k.get('intent', {}).get('n', 0)
-        with st.expander("**Level 3 — Behavior** (Intent to Change Practice)", expanded=True):
-            st.markdown("*Did learners intend to apply what they learned?*")
-            if intent_pct is not None:
-                st.metric("Intent to Change Practice", f"{intent_pct}%", f"n={intent_n}")
-                bc = ev_k.get('behavior_change', {})
-                if bc:
-                    st.markdown("**Planned behavior changes:**")
-                    for item, cnt in sorted(bc.items(), key=lambda x: x[1], reverse=True)[:5]:
-                        st.markdown(f"- {str(item)[:70]}: {cnt} respondents")
-            else:
-                st.info("No intent to change data available.")
-
-        # Level 4 — Results
-        fu_n = ev_k.get('followup_n', 0)
-        with st.expander("**Level 4 — Results** (Actual Practice Change)", expanded=True):
-            st.markdown("*Did learners actually change their practice?*")
-            if fu_n > 0:
-                st.metric("Follow-Up Respondents", fu_n)
-                st.info("Follow-up data available — review Behavior/Barriers tab for details.")
-            else:
-                st.info("No follow-up data collected for this program.")
-
-    # ─── CIRCLE tab ──────────────────────────────────────────────────────────
-    with tabs[6]:
-        st.markdown("#### CIRCLE Framework for CE/CPD Outcomes")
-        st.caption("An emerging outcomes model mapping learning to six dimensions of physician identity")
-        ev_c = compute_evaluation(df, eval_cols)
-        kn_c = compute_knowledge(df, pre_cols, post_cols)
-        comp_c = compute_competence(df, pre_cols, post_cols)
-
-        circle_dims = [
-            ("🎓 Competence", "Knowledge and skill gains from this activity",
-             f"{len(kn_c)} MCQ questions analyzed, {len(comp_c)} Likert items analyzed"),
-            ("💪 Confidence", "Learner confidence to apply new knowledge independently",
-             f"Avg Likert pre-mean: {round(sum(r['pre_mean'] for r in comp_c)/len(comp_c),2) if comp_c else '—'}  →  Avg post-mean: {round(sum(r['post_mean'] for r in comp_c if r['post_mean'])/max(1,sum(1 for r in comp_c if r['post_mean'])),2) if comp_c else '—'}"),
-            ("🤝 Relationships", "Impact on patient communication and shared decision-making",
-             "Derived from intent to change and behavior change items related to patient interaction"),
-            ("🌍 Community", "Broader practice and system-level impact",
-             f"System barriers identified: {len(ev_c.get('barrier_system', {}))} categories"),
-            ("📚 Learning", "Engagement with educational content",
-             f"Content rated as new: {ev_c.get('content_new', {}).get('pct', '—')}%  |  Satisfaction avg: {round(sum(s['pct'] for s in ev_c.get('satisfaction',[])) / max(1,len(ev_c.get('satisfaction',[]))) ,1) if ev_c.get('satisfaction') else '—'}%"),
-            ("🔬 Evidence", "Evidence-based practice adoption",
-             f"Intent to change: {ev_c.get('intent',{}).get('pct','—')}%  |  Would recommend: {ev_c.get('recommend',{}).get('pct','—')}%"),
-        ]
-
-        c1, c2 = st.columns(2)
-        for i, (title, desc, data) in enumerate(circle_dims):
-            with (c1 if i % 2 == 0 else c2):
-                st.markdown(f"**{title}**")
-                st.caption(desc)
-                st.info(data)
-                st.markdown("")
-
-        st.markdown("---")
-        st.caption("The CIRCLE Framework is an emerging model in CE/CPD outcomes measurement. "
-                   "Full implementation requires program-specific mapping of questions to each dimension.")
-
-    # ─── AI Insights tab ─────────────────────────────────────────────────────
-    with tabs[7]:
-        st.markdown("#### AI-Generated Outcomes Analysis")
-        st.caption("Powered by Claude — generates grant-ready narrative from your data")
-
-        # API Key input
-        api_key = st.text_input(
-            "Anthropic API Key",
-            type="password",
-            placeholder="sk-ant-...",
-            help="Get your key at console.anthropic.com → API Keys. It is not stored."
-        )
-        if not api_key:
-            st.info("Enter your Anthropic API key above to enable AI Insights. "
-                    "Get one free at **console.anthropic.com**")
-
-        ev_ai = compute_evaluation(df, eval_cols)
-        kn_ai = compute_knowledge(df, pre_cols, post_cols)
-        comp_ai = compute_competence(df, pre_cols, post_cols)
-
-        # Build data summary for the prompt
-        def build_data_summary():
-            lines = []
-            lines.append(f"PROGRAM OVERVIEW")
-            lines.append(f"Total learners: {len(df)}")
-            lines.append(f"Pre+Post matched: {has_post}")
-            lines.append(f"With evaluation: {has_eval}")
-            lines.append(f"Follow-up: {has_fu}")
-            lines.append(f"Exchange: {ex_n}, Nexus: {nx_n}")
-            lines.append("")
-            lines.append("KNOWLEDGE GAINS (MCQ % Correct)")
-            for r in kn_ai:
-                lines.append(f"- {r['label'][:60]}: Pre {r['pre_pct']}% → Post {r['post_pct']}% (gain +{r['gain']}pp, p={r['p_val']})")
-            lines.append("")
-            lines.append("COMPETENCE SHIFTS (Likert)")
-            for r in comp_ai:
-                lines.append(f"- {r['label'][:60]}: Pre {r['pre_mean']} → Post {r['post_mean']} (Δ{r['delta_mean']}, p={r['p_val']})")
-            lines.append("")
-            lines.append("EVALUATION METRICS")
-            lines.append(f"Intent to Change: {ev_ai.get('intent',{}).get('pct')}% (n={ev_ai.get('intent',{}).get('n')})")
-            lines.append(f"Would Recommend: {ev_ai.get('recommend',{}).get('pct')}% (n={ev_ai.get('recommend',{}).get('n')})")
-            lines.append(f"Bias-Free: {ev_ai.get('bias_free',{}).get('pct')}%")
-            lines.append(f"Content New: {ev_ai.get('content_new',{}).get('pct')}%")
-            lines.append("")
-            lines.append("SATISFACTION (% Agree/Strongly Agree)")
-            for s in ev_ai.get('satisfaction', []):
-                lines.append(f"- {s['label'][:60]}: {s['pct']}%")
-            return "\n".join(lines)
-
-        if 'ai_insights' not in st.session_state:
-            st.session_state.ai_insights = None
-
-        col_btn1, col_btn2 = st.columns([1, 4])
-        with col_btn1:
-            if st.button("🤖 Generate Insights", type="primary", disabled=not api_key):
-                with st.spinner("Analyzing outcomes data…"):
-                    try:
-                        import requests
-                        data_summary = build_data_summary()
-                        prompt = f"""You are an expert in CME/CE outcomes analysis and medical education research.
-
-Analyze the following CME program outcomes data and generate a comprehensive grant-ready narrative report.
-
-{data_summary}
-
-Please provide:
-1. EXECUTIVE SUMMARY (2-3 sentences, highlight key findings)
-2. KNOWLEDGE OUTCOMES (discuss MCQ gains with statistics, Moore's Level 2)
-3. COMPETENCE OUTCOMES (discuss Likert shifts, Moore's Level 3)
-4. PRACTICE IMPACT (intent to change, behavior change, Moore's Level 4)
-5. PROGRAM QUALITY (satisfaction, bias-free, content novelty)
-6. RECOMMENDATIONS (2-3 specific recommendations for future programs)
-
-Use specific statistics. Frame for a pharmaceutical grant outcomes report. Be concise but thorough."""
-
-                        response = requests.post(
-                            "https://api.anthropic.com/v1/messages",
-                            headers={
-                                "Content-Type": "application/json",
-                                "x-api-key": api_key,
-                                "anthropic-version": "2023-06-01"
-                            },
-                            json={
-                                "model": "claude-sonnet-4-20250514",
-                                "max_tokens": 1500,
-                                "messages": [{"role": "user", "content": prompt}]
-                            },
-                            timeout=60
-                        )
-                        result = response.json()
-                        if 'content' in result and result['content']:
-                            st.session_state.ai_insights = result['content'][0]['text']
-                        else:
-                            st.session_state.ai_insights = f"Error: {result.get('error', {}).get('message', 'Unknown error')}"
-                    except Exception as e:
-                        st.session_state.ai_insights = f"Error generating insights: {str(e)}"
-
-        with col_btn2:
-            if st.session_state.ai_insights:
-                if st.button("↺ Regenerate"):
-                    st.session_state.ai_insights = None
-                    st.rerun()
-
-        if st.session_state.ai_insights:
-            st.markdown(st.session_state.ai_insights)
-            st.download_button(
-                "⬇ Download Insights",
-                st.session_state.ai_insights,
-                file_name="CME_AI_Insights.txt",
-                mime="text/plain"
-            )
-        else:
-            st.info("Click **Generate Insights** to produce a grant-ready outcomes narrative powered by AI.")
-
-    # ─── JCEHP Article tab ───────────────────────────────────────────────────
-    with tabs[8]:
-        st.markdown("#### JCEHP Article Writer")
-        st.caption("Researches current JCEHP submission criteria, auto-generates a title, and writes a publication-ready manuscript")
-
-        ev_j = compute_evaluation(df, eval_cols)
-        kn_j = compute_knowledge(df, pre_cols, post_cols)
-        comp_j = compute_competence(df, pre_cols, post_cols)
-
-        api_key_j = st.text_input(
-            "Anthropic API Key",
-            type="password",
-            placeholder="sk-ant-...",
-            key="jcehp_api_key",
-            help="Get your key at console.anthropic.com"
-        )
-
-        therapeutic_area = st.text_input("Therapeutic area",
-                                          placeholder="e.g. Metabolic Dysfunction-Associated Steatohepatitis (MASH)")
-        
-        st.caption("The article title will be auto-generated from your data. You can edit it after generation.")
-
-        if 'jcehp_article' not in st.session_state:
-            st.session_state.jcehp_article = None
-        if 'jcehp_title' not in st.session_state:
-            st.session_state.jcehp_title = None
-        if 'jcehp_criteria' not in st.session_state:
-            st.session_state.jcehp_criteria = None
-
-        if st.button("📝 Research & Write JCEHP Article", type="primary", disabled=not api_key_j):
-            with st.spinner("Step 1 of 3: Researching JCEHP submission criteria..."):
-                try:
-                    import requests
-
-                    def build_jcehp_data():
-                        lines = [
-                            f"Therapeutic area: {therapeutic_area}",
-                            f"Total learners: {len(df)}",
-                            f"Exchange learners: {ex_n}",
-                            f"Nexus learners: {nx_n}",
-                            f"Pre/Post matched: {has_post}",
-                            f"With evaluation: {has_eval}",
-                            f"Follow-up respondents: {has_fu}",
-                        ]
-                        for r in kn_j:
-                            lines.append(f"MCQ '{r['label'][:70]}': Pre={r['pre_pct']}% (n={r['pre_n']}) Post={r['post_pct']}% (n={r['post_n']}) Gain=+{r['gain']}pp p={r['p_val']}")
-                        for r in comp_j:
-                            lines.append(f"Likert '{r['label'][:60]}': Pre mean={r['pre_mean']} Post mean={r['post_mean']} Delta={r['delta_mean']} p={r['p_val']}")
-                        lines.append(f"Intent to change: {ev_j.get('intent',{}).get('pct')}% (n={ev_j.get('intent',{}).get('n')})")
-                        lines.append(f"Would recommend: {ev_j.get('recommend',{}).get('pct')}% (n={ev_j.get('recommend',{}).get('n')})")
-                        lines.append(f"Bias-free: {ev_j.get('bias_free',{}).get('pct')}% (n={ev_j.get('bias_free',{}).get('n')})")
-                        lines.append(f"Content new: {ev_j.get('content_new',{}).get('pct')}% (n={ev_j.get('content_new',{}).get('n')})")
-                        for s in ev_j.get('satisfaction', []):
-                            lines.append(f"Satisfaction '{s['label'][:50]}': {s['pct']}% (n={s['n']})")
-                        bc = ev_j.get('behavior_change', {})
-                        for item, cnt in list(bc.items())[:5]:
-                            lines.append(f"Behavior change '{str(item)[:60]}': {cnt} respondents")
-                        return "\n".join(lines)
-
-                    data_summary = build_jcehp_data()
-
-                    # Step 1: Research JCEHP criteria using web search tool
-                    criteria_prompt = """Search for and summarize the current submission guidelines for the Journal of Continuing Education in the Health Professions (JCEHP). 
-                    Include: word limits, required sections, abstract format, reference style, statistical reporting requirements, and any specific requirements for outcomes research manuscripts.
-                    Be specific and cite what you find."""
-
-                    criteria_response = requests.post(
-                        "https://api.anthropic.com/v1/messages",
-                        headers={
-                            "Content-Type": "application/json",
-                            "x-api-key": api_key_j,
-                            "anthropic-version": "2023-06-01"
-                        },
-                        json={
-                            "model": "claude-sonnet-4-20250514",
-                            "max_tokens": 1000,
-                            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
-                            "messages": [{"role": "user", "content": criteria_prompt}]
-                        },
-                        timeout=60
-                    )
-                    criteria_result = criteria_response.json()
-                    criteria_text = " ".join(
-                        block.get('text', '') for block in criteria_result.get('content', [])
-                        if block.get('type') == 'text'
-                    )
-                    st.session_state.jcehp_criteria = criteria_text
-
-                except Exception as e:
-                    st.session_state.jcehp_criteria = f"Could not retrieve criteria: {str(e)}"
-
-            with st.spinner("Step 2 of 3: Generating article title..."):
-                try:
-                    title_prompt = f"""Based on the following CME program outcomes data, generate a compelling, publication-ready title for a JCEHP manuscript.
-
-DATA:
-{data_summary}
-
-Requirements for the title:
-- Should reflect the educational intervention and key outcomes
-- Should mention the therapeutic area
-- Should be specific enough to convey the significance of findings
-- Should follow JCEHP title conventions (informative, not sensational)
-- Should be 15-20 words maximum
-
-Return ONLY the title, nothing else."""
-
-                    title_response = requests.post(
-                        "https://api.anthropic.com/v1/messages",
-                        headers={
-                            "Content-Type": "application/json",
-                            "x-api-key": api_key_j,
-                            "anthropic-version": "2023-06-01"
-                        },
-                        json={
-                            "model": "claude-sonnet-4-20250514",
-                            "max_tokens": 100,
-                            "messages": [{"role": "user", "content": title_prompt}]
-                        },
-                        timeout=30
-                    )
-                    title_result = title_response.json()
-                    if 'content' in title_result and title_result['content']:
-                        st.session_state.jcehp_title = title_result['content'][0]['text'].strip()
-                    else:
-                        st.session_state.jcehp_title = f"CME Outcomes in {therapeutic_area}: A Multi-Vendor Analysis"
-
-                except Exception as e:
-                    st.session_state.jcehp_title = f"CME Outcomes in {therapeutic_area}"
-
-            with st.spinner("Step 3 of 3: Writing manuscript..."):
-                try:
-                    article_prompt = f"""Write a complete, publication-ready manuscript for the Journal of Continuing Education in the Health Professions (JCEHP).
-
-JCEHP SUBMISSION CRITERIA (researched):
-{st.session_state.jcehp_criteria or "Standard JCEHP format"}
-
-ARTICLE TITLE:
-{st.session_state.jcehp_title}
-
-PROGRAM OUTCOMES DATA:
-{data_summary}
-
-Write a full manuscript with these sections, adhering strictly to JCEHP style:
-
-STRUCTURED ABSTRACT (250 words max)
-Background: [educational gap addressed]
-Methods: [activity design, assessment approach, statistical methods]  
-Results: [key statistics with n values and p-values]
-Conclusions: [implications for CE/CPD practice]
-
-INTRODUCTION
-- Educational gap and significance (cite relevant literature concepts)
-- Rationale for this CME intervention
-- Study objectives
-
-METHODS
-- Activity design and format
-- Accreditation details (CME/CE)
-- Assessment instruments (pre/post MCQ, Likert, evaluation survey)
-- Data collection (Exchange vendor: n={ex_n}, Nexus vendor: n={nx_n})
-- Statistical analysis approach (chi-square for MCQ, t-test for Likert, descriptive for evaluation)
-
-RESULTS
-- Participant characteristics
-- Knowledge outcomes (all MCQ data with statistics)
-- Competence outcomes (all Likert data with statistics)  
-- Practice change outcomes (intent, behavior change)
-- Program quality (satisfaction, bias-free, content novelty)
-
-DISCUSSION
-- Interpretation of findings in context of CE/CPD literature
-- Comparison to Moore's Framework levels
-- Limitations (interim data, self-reported outcomes, selection bias)
-- Implications for future CE programs
-
-CONCLUSIONS
-
-Use formal academic language. Include all statistics. Write as if submitting for peer review."""
-
-                    article_response = requests.post(
-                        "https://api.anthropic.com/v1/messages",
-                        headers={
-                            "Content-Type": "application/json",
-                            "x-api-key": api_key_j,
-                            "anthropic-version": "2023-06-01"
-                        },
-                        json={
-                            "model": "claude-sonnet-4-20250514",
-                            "max_tokens": 3000,
-                            "messages": [{"role": "user", "content": article_prompt}]
-                        },
-                        timeout=120
-                    )
-                    result = article_response.json()
-                    if 'content' in result and result['content']:
-                        st.session_state.jcehp_article = result['content'][0]['text']
-                    else:
-                        st.session_state.jcehp_article = f"Error: {result.get('error',{}).get('message','Unknown error')}"
-                except Exception as e:
-                    st.session_state.jcehp_article = f"Error writing article: {str(e)}"
-
-        if st.session_state.jcehp_title:
-            st.markdown("---")
-            st.markdown(f"**Generated Title:**")
-            edited_title = st.text_input("Edit title if needed:", 
-                                          value=st.session_state.jcehp_title,
-                                          key="jcehp_title_edit")
-
-        if st.session_state.jcehp_criteria:
-            with st.expander("📋 JCEHP Submission Criteria (researched)", expanded=False):
-                st.markdown(st.session_state.jcehp_criteria)
-
-        if st.session_state.jcehp_article:
-            st.markdown("---")
-            st.markdown(st.session_state.jcehp_article)
-            full_text = f"TITLE: {st.session_state.jcehp_title}\n\n{st.session_state.jcehp_article}"
-            st.download_button(
-                "⬇ Download Article Draft",
-                full_text,
-                file_name="JCEHP_Article_Draft.txt",
-                mime="text/plain"
-            )
-        else:
-            st.info("Enter your API key and therapeutic area, then click **Research & Write JCEHP Article**.")
-
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown('<div style="background:#1e293b;border:2px dashed #7c3aed;border-radius:12px;padding:24px;text-align:center;margin-bottom:8px"><div style="font-size:32px">📊</div><div style="color:#a78bfa;font-size:16px;font-weight:600;margin:8px 0">Exchange File</div><div style="color:#64748b;font-size:12px">Single-sheet .xlsx (PRE/POST/EVAL columns)</div></div>', unsafe_allow_html=True)
+        ex_file = st.file_uploader("Exchange", type=['xlsx'], key='ex_upload', label_visibility='collapsed')
+    with col2:
+        st.markdown('<div style="background:#1e293b;border:2px dashed #16a34a;border-radius:12px;padding:24px;text-align:center;margin-bottom:8px"><div style="font-size:32px">📋</div><div style="color:#4ade80;font-size:16px;font-weight:600;margin:8px 0">Nexus File</div><div style="color:#64748b;font-size:12px">Multi-sheet .xlsx (Pre, Post, Eval sheets)</div></div>', unsafe_allow_html=True)
+        nx_file = st.file_uploader("Nexus", type=['xlsx'], key='nx_upload', label_visibility='collapsed')
+
+    if ex_file or nx_file:
+        if st.button("🚀  Analyze Files", use_container_width=True):
+            with st.spinner("Parsing files…"):
+                ex_rec = parse_exchange(ex_file.read()) if ex_file else []
+                nx_rec = parse_nexus(nx_file.read())   if nx_file else []
+                if ex_file: st.session_state['prog_name'] = ex_file.name.rsplit('.',1)[0]
+                st.session_state['ex_records']  = ex_rec
+                st.session_state['nx_records']  = nx_rec
+                st.session_state['all_records'] = ex_rec + nx_rec
+                st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 9 — MAIN
+# MAIN
 # ══════════════════════════════════════════════════════════════════════════════
-
 def main():
-    st.set_page_config(
-        page_title  = "Integritas CME Outcomes Harmonizer",
-        page_icon   = "📊",
-        layout      = "wide",
-        initial_sidebar_state = "collapsed",
-    )
-    st.markdown("""
-<style>
-  [data-testid="stAppViewContainer"] { background: #0f172a; }
-  [data-testid="stHeader"] { background: transparent; }
-  .stTabs [data-baseweb="tab-list"] { gap: 6px; background: #1e293b; padding: 6px; border-radius: 10px; }
-  .stTabs [data-baseweb="tab"] {
-      background: transparent; border-radius: 8px;
-      padding: 8px 18px; color: #94a3b8; font-weight: 500;
-  }
-  .stTabs [aria-selected="true"] { background: #3b82f6 !important; color: #ffffff !important; }
-  div[data-testid="metric-container"] {
-      background: #1e293b; border: 1px solid #334155;
-      border-radius: 12px; padding: 12px;
-  }
-  .stExpander { background: #1e293b; border: 1px solid #334155; border-radius: 10px; }
-  h4 { color: #f1f5f9 !important; }
-  .stMarkdown p { color: #cbd5e1; }
-</style>
-""", unsafe_allow_html=True)
+    ex_records  = st.session_state.get('ex_records', [])
+    nx_records  = st.session_state.get('nx_records', [])
+    all_records = st.session_state.get('all_records', [])
 
-    col_title, col_ver = st.columns([5, 1])
-    with col_title:
-        st.title("📊 Integritas CME Outcomes Harmonizer")
-        st.caption("Tab 1: Merge Exchange + Nexus → combined Excel  |  "
-                   "Tab 2: Analyze combined Excel → outcomes dashboard")
-    with col_ver:
-        st.markdown("""
-<div style="background:#1e3a5f;border:1px solid #3b82f6;border-radius:8px;
-            padding:8px 12px;text-align:center;margin-top:12px">
-  <div style="font-size:9px;color:#64748b;text-transform:uppercase">Version</div>
-  <div style="font-size:13px;font-weight:700;color:#3b82f6">v2.0 — Mar 27</div>
-</div>
-""", unsafe_allow_html=True)
+    # ── HEADER ──
+    prog = st.session_state.get('prog_name','')
+    ex_badge = f'<span style="background:#7c3aed22;border:1px solid #7c3aed;color:#a78bfa;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:600">⬤ Exchange ({len(ex_records)})</span>' if ex_records else ''
+    nx_badge = f'<span style="background:#16a34a22;border:1px solid #16a34a;color:#4ade80;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:600">⬤ Nexus ({len(nx_records)})</span>'  if nx_records else ''
+    st.markdown(f"""
+<div style="background:#0f172a;border-bottom:1px solid #1e3a5f;padding:14px 32px;display:flex;align-items:center;gap:20px">
+  <div style="font-size:20px;font-weight:700;color:#fff;white-space:nowrap">
+    <span style="color:#22d3ee">Integritas</span> CME Outcomes Harmonizer
+  </div>
+  <div style="flex:1;color:#94a3b8;font-size:13px">{prog}</div>
+  <div style="display:flex;gap:8px;align-items:center">{ex_badge}{nx_badge}</div>
+</div>""", unsafe_allow_html=True)
 
-    tab_merge, tab_analyze = st.tabs(["🔀  Merger", "📈  Analyzer"])
+    if not all_records:
+        render_upload_screen()
+        return
 
-    with tab_merge:
-        render_merger()
+    # ── BUILD DATA ──
+    raw_df      = combine_records(ex_records, nx_records)
+    filtered_df = apply_filters(raw_df)
+    pre_c, post_c, eval_c, fu_c, meta_c = classify_cols(filtered_df)
+    kn   = compute_knowledge(filtered_df, pre_c, post_c)
+    comp = compute_competence(filtered_df, pre_c, post_c)
+    ev   = compute_evaluation(filtered_df, eval_c)
+    summ = compute_summary(filtered_df)
 
-    with tab_analyze:
-        render_analyzer()
+    # ── TAB BAR ──
+    active = st.session_state.get('tab','Overview')
+    tab_cols = st.columns(len(TABS))
+    for i, t in enumerate(TABS):
+        with tab_cols[i]:
+            if st.button(t, key=f'tab_{t}', use_container_width=True,
+                         type='primary' if t == active else 'secondary'):
+                st.session_state['tab'] = t
+                st.rerun()
+
+    # ── ACTION ROW ──
+    a1, a2, a3, a4, _sp = st.columns([1,1,1,1,3])
+    with a1:
+        if st.button("🧠 Deep Insights"): st.session_state['tab']='AI Insights'; st.rerun()
+    with a2:
+        if st.button("✍️ Write Article"): st.session_state['tab']='JCEHP Article'; st.rerun()
+    with a3:
+        st.button("📄 PDF Report")
+    with a4:
+        xlsx_data = export_xlsx(filtered_df, kn, comp, ev, summ)
+        st.download_button("📊 XLSX", data=xlsx_data, file_name="cme_outcomes.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    # ── VENDOR FILTER ──
+    vf = st.session_state.get('vendor_filter','All')
+    ex_n = int((raw_df['_source']=='Exchange').sum()) if '_source' in raw_df.columns else 0
+    nx_n = int((raw_df['_source']=='Nexus').sum())    if '_source' in raw_df.columns else 0
+    vc1, vc2, vc3, _vsp = st.columns([1,1,1,5])
+    with vc1:
+        if st.button(f"All ({len(raw_df)})", key='vf_all',
+                     type='primary' if vf=='All' else 'secondary'):
+            st.session_state['vendor_filter']='All'; st.rerun()
+    with vc2:
+        if st.button(f"⬤ Exchange ({ex_n})", key='vf_ex',
+                     type='primary' if vf=='Exchange' else 'secondary'):
+            st.session_state['vendor_filter']='Exchange'; st.rerun()
+    with vc3:
+        if st.button(f"⬤ Nexus ({nx_n})", key='vf_nx',
+                     type='primary' if vf=='Nexus' else 'secondary'):
+            st.session_state['vendor_filter']='Nexus'; st.rerun()
+
+    st.divider()
+
+    # ── RENDER ACTIVE TAB ──
+    t = st.session_state.get('tab','Overview')
+    pn = st.session_state.get('prog_name','')
+    if   t == 'Overview':         tab_overview(filtered_df, summ, ev, kn, comp)
+    elif t == 'Knowledge':        tab_knowledge(filtered_df, kn)
+    elif t == 'Competence':       tab_competence(filtered_df, comp, ev)
+    elif t == 'Evaluation':       tab_evaluation(filtered_df, ev)
+    elif t == 'Key Findings':     tab_key_findings(filtered_df, kn, comp, ev, summ)
+    elif t == 'Kirkpatrick':      tab_kirkpatrick(filtered_df, kn, comp, ev, summ)
+    elif t == 'CIRCLE Framework': tab_circle(filtered_df, kn, comp, ev, summ)
+    elif t == 'JCEHP Article':    tab_jcehp(filtered_df, kn, comp, ev, summ, pn)
+    elif t == 'AI Insights':      tab_ai_insights(filtered_df, kn, comp, ev, summ)
+
+    st.divider()
+    if st.button("📁 Upload New Files"):
+        for k in ['ex_records','nx_records','all_records','ai_insights']:
+            st.session_state[k] = []
+        st.session_state['jcehp_text'] = {}
+        st.rerun()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
