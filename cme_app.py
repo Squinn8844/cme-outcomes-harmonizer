@@ -969,8 +969,7 @@ def compute_evaluation(df, eval_cols):
                    'barrier', 'plan to', 'accommodate', 'utilized', 'patient access',
                    'please', 'comment', 'feedback', 'topic', 'credit', 'specify',
                    'how long', 'practice type', 'specialty', 'if no', 'explain']
-    satisfaction = []
-    seen_sat_labels = set()
+    satisfaction_raw = []
     for col in eval_cols:
         cl = col.lower()
         if any(ex in cl for ex in SAT_EXCLUDE):
@@ -984,10 +983,18 @@ def compute_evaluation(df, eval_cols):
                         'EVAL_', 'META_', 'PRE_', 'POST_']:
                 label = label.replace(pfx, '')
             label = label[:70]
-            if label not in seen_sat_labels:
-                seen_sat_labels.add(label)
-                satisfaction.append({'label': label, 'pct': pct, 'n': n, 'col': col})
+            satisfaction_raw.append({'label': label, 'pct': pct, 'n': n, 'col': col})
 
+    # Deduplicate: for questions with similar wording, keep the one with most respondents
+    seen_norm = {}
+    for item in satisfaction_raw:
+        # Normalize: lowercase, strip punctuation, first 45 chars
+        norm = ''.join(c for c in item['label'].lower() if c.isalnum() or c == ' ')[:45].strip()
+        if norm not in seen_norm or item['n'] > seen_norm[norm]['n']:
+            seen_norm[norm] = item
+    satisfaction = list(seen_norm.values())
+    # Sort by pct descending
+    satisfaction.sort(key=lambda x: x['pct'] or 0, reverse=True)
     metrics['satisfaction'] = satisfaction
 
     # Behavior change — look for the "plan to implement" eval column
@@ -996,8 +1003,17 @@ def compute_evaluation(df, eval_cols):
         from collections import Counter
         all_vals = []
         for v in df[behavior_col].dropna():
-            parts = str(v).split(',')
-            all_vals.extend([p.strip()[:80] for p in parts if p.strip() and p.strip() != 'nan'])
+            s = str(v).strip()
+            if not s or s.lower() == 'nan':
+                continue
+            # Split on newlines or pipes only, NOT commas (phrases contain commas)
+            if '\n' in s:
+                parts = [p.strip() for p in s.split('\n') if p.strip()]
+            elif ' | ' in s:
+                parts = [p.strip() for p in s.split(' | ') if p.strip()]
+            else:
+                parts = [s]
+            all_vals.extend([clean_text(p[:80]) for p in parts])
         counts = dict(Counter(all_vals).most_common(10))
         metrics['behavior_change'] = counts
 
@@ -1014,15 +1030,24 @@ def compute_evaluation(df, eval_cols):
             if bc:
                 break
         if bc is None:
-            # fallback
             bc = find_col(df, 'barrier', barrier_type)
         if bc:
-            # Split multi-value responses and count individually
+            from collections import Counter
             all_vals = []
             for v in df[bc].dropna():
-                parts = str(v).split(',')
-                all_vals.extend([p.strip() for p in parts if p.strip()])
-            from collections import Counter
+                s = str(v).strip()
+                if not s or s.lower() == 'nan':
+                    continue
+                # Only split if the value looks like a checkbox list
+                # (contains newlines or " | " separators, NOT regular commas in phrases)
+                if '\n' in s:
+                    parts = [p.strip() for p in s.split('\n') if p.strip()]
+                elif ' | ' in s:
+                    parts = [p.strip() for p in s.split(' | ') if p.strip()]
+                else:
+                    # Treat entire value as one item (comma is part of the phrase)
+                    parts = [s]
+                all_vals.extend(parts)
             counts = dict(Counter(all_vals).most_common(8))
             metrics[f'barrier_{barrier_type}'] = counts
 
@@ -1129,6 +1154,34 @@ def bar_html(pct, color='#3b82f6', max_width=200):
             f'<span style="font-size:12px">{pct}%</span>')
 
 
+def clean_text(text):
+    """Fix common encoding issues in column names and values."""
+    if not text:
+        return text
+    replacements = [
+        ('â', '–'),  # â€" -> en dash
+        ('â', '—'),  # â€" -> em dash
+        ('â', '“'),  # â€œ -> left quote
+        ('â', '”'),  # â€ -> right quote
+        ('â', '‘'),  # â€˜ -> left single
+        ('â', '’'),  # â€™ -> right single
+        ('Â ', ' '),             # Â  -> space
+        ('â1', '–1'), # common combo
+        ('â', '–'),
+        ('â', '—'),
+        ('â', '’'),
+        ('â', '“'),
+        ('â', '”'),
+        ('â€"', '–'),
+        ('â€™', '’'),
+        ('â€œ', '“'),
+        ('â€', '”'),
+    ]
+    for bad, good in replacements:
+        text = text.replace(bad, good)
+    return text
+
+
 def source_breakdown(df, col, compute_fn):
     """Return {Exchange: val, Nexus: val, Combined: val} for any metric fn."""
     out = {}
@@ -1142,6 +1195,88 @@ def source_breakdown(df, col, compute_fn):
             continue
         out[src] = compute_fn(subset[col])
     return out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECTION 6b — POPUP / DETAIL PANEL HELPER
+# ══════════════════════════════════════════════════════════════════════════════
+
+METRIC_DEFINITIONS = {
+    'intent': {
+        'name': 'Intent to Change Practice',
+        'definition': 'The percentage of evaluation respondents who indicated they intend to modify or change their clinical practice as a result of this educational activity.',
+        'formula': 'COUNT(Yes / Agree / Strongly Agree responses) ÷ COUNT(non-null responses) × 100',
+        'moore_level': "Moore's Level 4 - Competence",
+    },
+    'recommend': {
+        'name': 'Would Recommend',
+        'definition': 'The percentage of evaluation respondents who indicated they would recommend this program to a colleague.',
+        'formula': 'COUNT(Yes responses) ÷ COUNT(non-null responses) × 100',
+        'moore_level': "Moore's Level 3 - Learning",
+    },
+    'bias_free': {
+        'name': 'Free of Commercial Bias',
+        'definition': 'The percentage of evaluation respondents who rated the educational content as free of commercial bias.',
+        'formula': 'COUNT(Yes responses) ÷ COUNT(non-null responses) × 100',
+        'moore_level': "Moore's Level 3 - Learning",
+    },
+    'content_new': {
+        'name': 'Content Was New',
+        'definition': 'The average percentage of educational content that respondents rated as new to them — indicating the degree of knowledge gap addressed.',
+        'formula': 'MEAN(% new ratings across all respondents with valid responses)',
+        'moore_level': "Moore's Level 2 - Participation",
+    },
+    'knowledge': {
+        'name': 'Knowledge Gain (MCQ % Correct)',
+        'definition': 'The percentage of respondents selecting the correct answer on a multiple-choice question, comparing pre-test vs post-test performance.',
+        'formula': 'COUNT(correct responses) ÷ COUNT(non-null responses) × 100',
+        'moore_level': "Moore's Level 4 - Competence",
+    },
+    'competence': {
+        'name': 'Competence / Confidence Shift (Likert)',
+        'definition': 'The mean score on a 5-point Likert scale comparing pre-test vs post-test self-reported competence or confidence.',
+        'formula': 'MEAN(Likert scores 1-5) at pre vs post; % ≥4 = COUNT(scores ≥ 4) ÷ COUNT(non-null) × 100',
+        'moore_level': "Moore's Level 4 - Competence",
+    },
+    'satisfaction': {
+        'name': 'Satisfaction (% Agree / Strongly Agree)',
+        'definition': 'The percentage of respondents selecting Agree or Strongly Agree on a satisfaction item about the educational activity.',
+        'formula': 'COUNT(Agree + Strongly Agree) ÷ COUNT(non-null responses) × 100',
+        'moore_level': "Moore's Level 3 - Learning",
+    },
+}
+
+
+def show_metric_popup(metric_key, df, col_name=None, extra_stats=None):
+    """Show an expander with definition, formula, Moore level, and source breakdown."""
+    defn = METRIC_DEFINITIONS.get(metric_key, {})
+    with st.expander(f"ℹ  {defn.get('name', metric_key)} — Details & Source Breakdown"):
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown(f"**Definition**")
+            st.markdown(defn.get('definition', '—'))
+            st.markdown(f"**Formula**")
+            st.code(defn.get('formula', '—'), language=None)
+            st.markdown(f"**Moore's Level:** `{defn.get('moore_level', '—')}`")
+        with c2:
+            st.markdown("**Source Breakdown**")
+            if col_name and col_name in df.columns:
+                for src in ['Exchange', 'Nexus', 'Combined']:
+                    sub = df if src == 'Combined' else df[df['_source'] == src] if '_source' in df.columns else df
+                    n = len(sub[col_name].dropna())
+                    if metric_key == 'content_new':
+                        pct, _ = avg_pct_new(sub[col_name])
+                    elif metric_key in ('intent', 'recommend', 'bias_free', 'satisfaction'):
+                        pct, _ = pct_yes(sub[col_name])
+                    else:
+                        pct = None
+                    val_str = f"{pct}%" if pct is not None else "—"
+                    bar = f'<div style="display:inline-block;background:#3b82f6;height:8px;width:{int((pct or 0)*1.5)}px;border-radius:3px;vertical-align:middle;margin:0 6px"></div>' if pct else ''
+                    st.markdown(f"**{src}** (n={n}): {val_str} {bar}", unsafe_allow_html=True)
+            if extra_stats:
+                st.markdown("**Additional Stats**")
+                for k, v in extra_stats.items():
+                    st.markdown(f"- {k}: **{v}**")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1207,6 +1342,59 @@ def render_analyzer():
         df, section_lookup = load_combined(combo_file.read())
 
     pre_cols, post_cols, eval_cols, meta_cols = classify_cols(df, section_lookup)
+
+    # ── SIDEBAR FILTERS ──
+    with st.sidebar:
+        st.markdown("## 🔽 Filters")
+        st.markdown("---")
+
+        # Vendor filter
+        st.markdown("**Data Source**")
+        vendors_available = sorted(df['_source'].dropna().unique().tolist()) if '_source' in df.columns else []
+        vendor_sel = st.multiselect("Vendor", vendors_available, default=vendors_available, key="vendor_filter")
+
+        # Profession filter
+        prof_col = next((c for c in df.columns if 'i am a' in c.lower()), None) or                    next((c for c in df.columns if 'credential' in c.lower()), None)
+        prof_sel = []
+        if prof_col:
+            st.markdown("**Profession / Credential**")
+            prof_vals = sorted(df[prof_col].dropna().unique().tolist())
+            prof_sel = st.multiselect("Profession", prof_vals, default=prof_vals, key="prof_filter")
+
+        # Specialty filter
+        spec_col = next((c for c in df.columns if c.lower().startswith('specialty')), None)
+        spec_sel = []
+        if spec_col:
+            st.markdown("**Specialty**")
+            spec_vals = sorted(df[spec_col].dropna().unique().tolist())
+            spec_sel = st.multiselect("Specialty", spec_vals, default=spec_vals, key="spec_filter")
+
+        st.markdown("---")
+        if st.button("Reset All Filters"):
+            st.rerun()
+
+    # Apply filters
+    df_filt = df.copy()
+    if vendor_sel and '_source' in df.columns:
+        df_filt = df_filt[df_filt['_source'].isin(vendor_sel)]
+    if prof_sel and prof_col:
+        df_filt = df_filt[df_filt[prof_col].isin(prof_sel)]
+    if spec_sel and spec_col:
+        df_filt = df_filt[df_filt[spec_col].isin(spec_sel)]
+
+    # Use filtered df everywhere
+    df = df_filt
+
+    # Filter badge display
+    active_filters = []
+    if vendor_sel and len(vendor_sel) < len(vendors_available):
+        active_filters.append(f"Vendor: {', '.join(vendor_sel)}")
+    if prof_sel and prof_col and len(prof_sel) < len(df[prof_col].dropna().unique() if prof_col else []):
+        active_filters.append(f"Profession: {len(prof_sel)} selected")
+    if spec_sel and spec_col and len(spec_sel) < len(df[spec_col].dropna().unique() if spec_col else []):
+        active_filters.append(f"Specialty: {len(spec_sel)} selected")
+    if active_filters:
+        st.info(f"🔽 Active filters: {' | '.join(active_filters)} — showing {len(df):,} of {len(df_filt):,} records")
 
     # ── Overview cards ──
     total_n   = len(df)
@@ -1330,28 +1518,27 @@ def render_analyzer():
                                f"n={r['post_n']}")
                     c3.metric("Gain", f"{r['gain']:+.1f}pp" if r['gain'] is not None else "—")
 
-                    st.markdown("**Definition:** % of respondents selecting the correct answer")
+                    defn_kn = METRIC_DEFINITIONS['knowledge']
+                    st.markdown(f"**Definition:** {defn_kn['definition']}")
                     if r.get('inferred'):
-                        st.caption(f"⚠ Correct answer inferred from most common post-test response — verify accuracy")
+                        st.warning("⚠ Correct answer inferred from most common post-test response — verify accuracy")
                     st.markdown(f"**Correct answer:** `{r['correct']}`")
-                    st.markdown(f"**Formula:** (# correct) ÷ (# answered) × 100")
-                    st.markdown(f"**p-value:** {pval_badge(r['p_val'])}", unsafe_allow_html=True)
-
-                    # Source breakdown
-                    if '_source' in df.columns and r['pre_col']:
-                        st.markdown("**Source breakdown:**")
-                        cols_bd = st.columns(3)
-                        for si, src in enumerate(['Exchange', 'Nexus', 'Combined']):
-                            sub = df if src == 'Combined' else df[df['_source'] == src]
-                            res_pre  = pct_correct(sub[r['pre_col']], r['correct']) if r['pre_col'] else None
-                            res_post = pct_correct(sub[r['post_col']], r['correct']) \
-                                       if r['post_col'] and r['post_col'] in sub.columns else None
-                            with cols_bd[si]:
-                                st.markdown(f"**{src}** (n={len(sub)})")
-                                if res_pre:
-                                    st.write(f"Pre: {res_pre[0]}%")
-                                if res_post:
-                                    st.write(f"Post: {res_post[0]}%")
+                    st.code(defn_kn['formula'], language=None)
+                    st.markdown(f"**Moore's Level:** `{defn_kn['moore_level']}`")
+                    st.markdown(f"**Statistical significance:** {pval_badge(r['p_val'])}", unsafe_allow_html=True)
+                    st.markdown("**Source Breakdown:**")
+                    src_html = ""
+                    for src in ['Exchange', 'Nexus', 'Combined']:
+                        sub = df if src == 'Combined' else df[df['_source'] == src] if '_source' in df.columns else df
+                        res_pre  = pct_correct(sub[r['pre_col']], r['correct']) if r['pre_col'] else None
+                        res_post = pct_correct(sub[r['post_col']], r['correct']) \
+                                   if r['post_col'] and r['post_col'] in sub.columns else None
+                        pre_pct  = res_pre[0]  if res_pre  else None
+                        post_pct = res_post[0] if res_post else None
+                        src_html += f"<div style='margin:8px 0'><b>{src}</b> (n={len(sub)})</div>"
+                        src_html += progress_bar_html(pre_pct,  "#64748b", "Pre-test")
+                        src_html += progress_bar_html(post_pct, "#3b82f6", "Post-test")
+                    st.markdown(src_html, unsafe_allow_html=True)
 
     # ─── Competence tab ──────────────────────────────────────────────────────
     with tabs[1]:
@@ -1374,51 +1561,73 @@ def render_analyzer():
                     c4.metric("Post % ≥4", f"{r['post_pct4']}%" if r['post_pct4'] is not None else "—",
                                delta=f"{r['delta_pct4']:+.1f}pp" if r['delta_pct4'] is not None else None)
 
-                    st.markdown("**Definition:** Mean score on 5-point Likert scale (1=lowest, 5=highest)")
-                    st.markdown("**% ≥4 formula:** COUNT(scores ≥ 4) ÷ COUNT(non-null) × 100")
-                    st.markdown(f"**p-value (t-test):** {pval_badge(r['p_val'])}", unsafe_allow_html=True)
+                    defn_txt = METRIC_DEFINITIONS['competence']
+                    st.markdown(f"**Definition:** {defn_txt['definition']}")
+                    st.code(defn_txt['formula'], language=None)
+                    st.markdown(f"**Moore's Level:** `{defn_txt['moore_level']}`")
+                    st.markdown(f"**Statistical significance (t-test):** {pval_badge(r['p_val'])}", unsafe_allow_html=True)
 
-                    # Source breakdown
-                    if '_source' in df.columns and r['pre_col']:
-                        st.markdown("**Source breakdown:**")
-                        bcols = st.columns(3)
-                        for si, src in enumerate(['Exchange', 'Nexus', 'Combined']):
-                            sub = df if src == 'Combined' else df[df['_source'] == src]
-                            ps = [to_likert(v) for v in sub[r['pre_col']].dropna() if to_likert(v)]
-                            with bcols[si]:
-                                st.markdown(f"**{src}** (n={len(sub)})")
-                                if ps:
-                                    st.write(f"Pre mean: {round(sum(ps)/len(ps),2)}")
+                    # Visual source breakdown
+                    st.markdown("**Source Breakdown:**")
+                    src_html = ""
+                    for src in ['Exchange', 'Nexus', 'Combined']:
+                        sub = df if src == 'Combined' else df[df['_source'] == src] if '_source' in df.columns else df
+                        if r['pre_col'] not in sub.columns: continue
+                        ps = [to_likert(v) for v in sub[r['pre_col']].dropna() if to_likert(v) is not None]
+                        post_scores = []
+                        if r['post_col'] and r['post_col'] in sub.columns:
+                            post_scores = [to_likert(v) for v in sub[r['post_col']].dropna() if to_likert(v) is not None]
+                        pre_pct4  = round(100*sum(1 for s in ps if s>=4)/len(ps),1) if ps else None
+                        post_pct4 = round(100*sum(1 for s in post_scores if s>=4)/len(post_scores),1) if post_scores else None
+                        src_html += f"<div style='margin:8px 0'><b>{src}</b> (n={len(sub)})</div>"
+                        src_html += progress_bar_html(pre_pct4,  "#64748b", f"Pre % ≥4 (mean={round(sum(ps)/len(ps),2) if ps else '—'})")
+                        src_html += progress_bar_html(post_pct4, "#3b82f6", f"Post % ≥4")
+                    st.markdown(src_html, unsafe_allow_html=True)
 
     # ─── Evaluation tab ──────────────────────────────────────────────────────
     with tabs[2]:
         st.markdown("#### Evaluation Metrics")
         ev = compute_evaluation(df, eval_cols)
 
-        cols_ev = st.columns(4)
-        defs = {
-            'intent':      ("Intent to Change",  "% selecting Yes/Strongly Agree to intending to modify practice"),
-            'recommend':   ("Would Recommend",   "% who would recommend this program to a colleague"),
-            'bias_free':   ("Bias-Free",          "% rating the content as free of commercial bias"),
-            'content_new': ("Content New",        "Avg % of content rated as new to the respondent"),
+        # Donut row
+        d1, d2, d3, d4 = st.columns(4)
+        ev_items = [
+            ('intent',      d1, "#3b82f6"),
+            ('recommend',   d2, "#22c55e"),
+            ('bias_free',   d3, "#a855f7"),
+            ('content_new', d4, "#f59e0b"),
+        ]
+        ev_labels = {
+            'intent': 'Intent to Change',
+            'recommend': 'Would Recommend',
+            'bias_free': 'Bias-Free',
+            'content_new': 'Content Was New',
         }
-        for ci, (mk, (label, defn)) in enumerate(defs.items()):
+        for mk, col, color in ev_items:
             m = ev.get(mk, {})
-            val = f"{m.get('pct')}%" if m.get('pct') is not None else "—"
-            with cols_ev[ci]:
-                with st.expander(f"**{label}**: {val}"):
-                    st.markdown(f"**Definition:** {defn}")
-                    st.markdown(f"**n:** {m.get('n', 0)}")
-                    if m.get('col'):
-                        st.markdown(f"**Column:** `{m['col'][:60]}`")
-                        # Source breakdown
-                        for src in ['Exchange', 'Nexus', 'Combined']:
-                            sub = df if src == 'Combined' else df[df['_source'] == src] if '_source' in df.columns else df
-                            if mk == 'content_new':
-                                pct, n = avg_pct_new(sub[m['col']])
-                            else:
-                                pct, n = pct_yes(sub[m['col']])
-                            st.write(f"{src}: {pct}% (n={n})" if pct is not None else f"{src}: — (n={n})")
+            with col:
+                st.markdown(donut_metric(ev_labels[mk], m.get('pct'), color, m.get('n')),
+                            unsafe_allow_html=True)
+
+        # Progress bars with source breakdown
+        st.markdown("---")
+        for mk, _, color in ev_items:
+            m = ev.get(mk, {})
+            if not m.get('col'): continue
+            st.markdown(f"**{ev_labels[mk]}**")
+            # Source breakdown bars
+            src_html = ""
+            for src in ['Exchange', 'Nexus', 'Combined']:
+                sub = df if src == 'Combined' else df[df['_source'] == src] if '_source' in df.columns else df
+                if mk == 'content_new':
+                    pct, n = avg_pct_new(sub[m['col']])
+                else:
+                    pct, n = pct_yes(sub[m['col']])
+                src_html += progress_bar_html(pct, color, f"{src} (n={n})")
+            st.markdown(src_html, unsafe_allow_html=True)
+            show_metric_popup(mk, df, m.get('col'),
+                              extra_stats={'Overall': f"{m.get('pct')}% (n={m.get('n')})"})
+            st.markdown("")
 
     # ─── Satisfaction tab ────────────────────────────────────────────────────
     with tabs[3]:
@@ -1427,19 +1636,18 @@ def render_analyzer():
         sat_items = ev.get('satisfaction', [])
 
         if not sat_items:
-            # Show all eval cols for debugging
             st.info("No satisfaction items detected via keyword matching.")
             with st.expander("All EVAL columns (debug)"):
                 for ec in eval_cols:
                     st.code(ec)
         else:
-            for item in sorted(sat_items, key=lambda x: x['pct'] or 0, reverse=True):
-                st.markdown(
-                    f"**{item['label']}** — "
-                    f"{bar_html(item['pct'])} "
-                    f"<span style='color:#94a3b8;font-size:11px'>(n={item['n']})</span>",
-                    unsafe_allow_html=True
-                )
+            colors_sat = ["#3b82f6","#22c55e","#a855f7","#f59e0b","#ef4444","#06b6d4","#ec4899","#84cc16"]
+            for i, item in enumerate(sorted(sat_items, key=lambda x: x['pct'] or 0, reverse=True)):
+                color = colors_sat[i % len(colors_sat)]
+                st.markdown(progress_bar_html(item['pct'], color, item['label'][:65]),
+                            unsafe_allow_html=True)
+                show_metric_popup('satisfaction', df, item['col'],
+                                  extra_stats={'% Agree/SA': f"{item['pct']}% (n={item['n']})"})
 
     # ─── Behavior / Barriers tab ─────────────────────────────────────────────
     with tabs[4]:
@@ -1686,7 +1894,7 @@ Use specific statistics. Frame for a pharmaceutical grant outcomes report. Be co
     # ─── JCEHP Article tab ───────────────────────────────────────────────────
     with tabs[8]:
         st.markdown("#### JCEHP Article Writer")
-        st.caption("Generate a publication-ready manuscript in JCEHP format")
+        st.caption("Researches current JCEHP submission criteria, auto-generates a title, and writes a publication-ready manuscript")
 
         ev_j = compute_evaluation(df, eval_cols)
         kn_j = compute_knowledge(df, pre_cols, post_cols)
@@ -1697,87 +1905,217 @@ Use specific statistics. Frame for a pharmaceutical grant outcomes report. Be co
             type="password",
             placeholder="sk-ant-...",
             key="jcehp_api_key",
-            help="Same key as AI Insights tab"
+            help="Get your key at console.anthropic.com"
         )
 
-        prog_name = st.text_input("Program title (for article)", 
-                                   placeholder="e.g. Overcoming Obstacles to MASH Diagnosis and Treatment")
         therapeutic_area = st.text_input("Therapeutic area",
                                           placeholder="e.g. Metabolic Dysfunction-Associated Steatohepatitis (MASH)")
+        
+        st.caption("The article title will be auto-generated from your data. You can edit it after generation.")
 
         if 'jcehp_article' not in st.session_state:
             st.session_state.jcehp_article = None
+        if 'jcehp_title' not in st.session_state:
+            st.session_state.jcehp_title = None
+        if 'jcehp_criteria' not in st.session_state:
+            st.session_state.jcehp_criteria = None
 
-        if st.button("📝 Write JCEHP Article", type="primary", disabled=not api_key_j):
-            if not prog_name:
-                st.warning("Please enter a program title first.")
-            else:
-                with st.spinner("Writing manuscript…"):
-                    try:
-                        import requests
-                        def build_jcehp_data():
-                            lines = [f"Program: {prog_name}", f"Therapeutic area: {therapeutic_area}",
-                                     f"Total learners: {len(df)}", f"Pre/Post matched: {has_post}",
-                                     f"With evaluation: {has_eval}"]
-                            for r in kn_j:
-                                lines.append(f"MCQ: {r['label'][:60]} Pre={r['pre_pct']}% Post={r['post_pct']}% p={r['p_val']}")
-                            for r in comp_j:
-                                lines.append(f"Likert: {r['label'][:60]} Pre={r['pre_mean']} Post={r['post_mean']} p={r['p_val']}")
-                            lines.append(f"Intent to change: {ev_j.get('intent',{}).get('pct')}%")
-                            lines.append(f"Would recommend: {ev_j.get('recommend',{}).get('pct')}%")
-                            lines.append(f"Bias-free: {ev_j.get('bias_free',{}).get('pct')}%")
-                            lines.append(f"Content new: {ev_j.get('content_new',{}).get('pct')}%")
-                            for s in ev_j.get('satisfaction',[]):
-                                lines.append(f"Satisfaction: {s['label'][:50]}={s['pct']}%")
-                            return "\n".join(lines)
+        if st.button("📝 Research & Write JCEHP Article", type="primary", disabled=not api_key_j):
+            with st.spinner("Step 1 of 3: Researching JCEHP submission criteria..."):
+                try:
+                    import requests
 
-                        prompt = f"""Write a complete, publication-ready manuscript for the Journal of Continuing Education in the Health Professions (JCEHP).
+                    def build_jcehp_data():
+                        lines = [
+                            f"Therapeutic area: {therapeutic_area}",
+                            f"Total learners: {len(df)}",
+                            f"Exchange learners: {ex_n}",
+                            f"Nexus learners: {nx_n}",
+                            f"Pre/Post matched: {has_post}",
+                            f"With evaluation: {has_eval}",
+                            f"Follow-up respondents: {has_fu}",
+                        ]
+                        for r in kn_j:
+                            lines.append(f"MCQ '{r['label'][:70]}': Pre={r['pre_pct']}% (n={r['pre_n']}) Post={r['post_pct']}% (n={r['post_n']}) Gain=+{r['gain']}pp p={r['p_val']}")
+                        for r in comp_j:
+                            lines.append(f"Likert '{r['label'][:60]}': Pre mean={r['pre_mean']} Post mean={r['post_mean']} Delta={r['delta_mean']} p={r['p_val']}")
+                        lines.append(f"Intent to change: {ev_j.get('intent',{}).get('pct')}% (n={ev_j.get('intent',{}).get('n')})")
+                        lines.append(f"Would recommend: {ev_j.get('recommend',{}).get('pct')}% (n={ev_j.get('recommend',{}).get('n')})")
+                        lines.append(f"Bias-free: {ev_j.get('bias_free',{}).get('pct')}% (n={ev_j.get('bias_free',{}).get('n')})")
+                        lines.append(f"Content new: {ev_j.get('content_new',{}).get('pct')}% (n={ev_j.get('content_new',{}).get('n')})")
+                        for s in ev_j.get('satisfaction', []):
+                            lines.append(f"Satisfaction '{s['label'][:50]}': {s['pct']}% (n={s['n']})")
+                        bc = ev_j.get('behavior_change', {})
+                        for item, cnt in list(bc.items())[:5]:
+                            lines.append(f"Behavior change '{str(item)[:60]}': {cnt} respondents")
+                        return "\n".join(lines)
+
+                    data_summary = build_jcehp_data()
+
+                    # Step 1: Research JCEHP criteria using web search tool
+                    criteria_prompt = """Search for and summarize the current submission guidelines for the Journal of Continuing Education in the Health Professions (JCEHP). 
+                    Include: word limits, required sections, abstract format, reference style, statistical reporting requirements, and any specific requirements for outcomes research manuscripts.
+                    Be specific and cite what you find."""
+
+                    criteria_response = requests.post(
+                        "https://api.anthropic.com/v1/messages",
+                        headers={
+                            "Content-Type": "application/json",
+                            "x-api-key": api_key_j,
+                            "anthropic-version": "2023-06-01"
+                        },
+                        json={
+                            "model": "claude-sonnet-4-20250514",
+                            "max_tokens": 1000,
+                            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+                            "messages": [{"role": "user", "content": criteria_prompt}]
+                        },
+                        timeout=60
+                    )
+                    criteria_result = criteria_response.json()
+                    criteria_text = " ".join(
+                        block.get('text', '') for block in criteria_result.get('content', [])
+                        if block.get('type') == 'text'
+                    )
+                    st.session_state.jcehp_criteria = criteria_text
+
+                except Exception as e:
+                    st.session_state.jcehp_criteria = f"Could not retrieve criteria: {str(e)}"
+
+            with st.spinner("Step 2 of 3: Generating article title..."):
+                try:
+                    title_prompt = f"""Based on the following CME program outcomes data, generate a compelling, publication-ready title for a JCEHP manuscript.
 
 DATA:
-{build_jcehp_data()}
+{data_summary}
 
-Format as a full JCEHP manuscript with these sections:
-- STRUCTURED ABSTRACT (Background, Methods, Results, Conclusions — 250 words max)
-- INTRODUCTION (significance of the educational gap, 2 paragraphs)
-- METHODS (activity design, accreditation, assessment instruments, statistical analysis)
-- RESULTS (all statistics presented with n values and p-values where applicable)
-- DISCUSSION (interpretation of findings, limitations, implications for CE/CPD)
-- CONCLUSIONS (key takeaways for the field)
+Requirements for the title:
+- Should reflect the educational intervention and key outcomes
+- Should mention the therapeutic area
+- Should be specific enough to convey the significance of findings
+- Should follow JCEHP title conventions (informative, not sensational)
+- Should be 15-20 words maximum
 
-Use formal academic language. Include all statistics from the data. Write as if for peer review submission."""
+Return ONLY the title, nothing else."""
 
-                        response = requests.post(
-                            "https://api.anthropic.com/v1/messages",
-                            headers={
-                                "Content-Type": "application/json",
-                                "x-api-key": api_key_j,
-                                "anthropic-version": "2023-06-01"
-                            },
-                            json={
-                                "model": "claude-sonnet-4-20250514",
-                                "max_tokens": 2000,
-                                "messages": [{"role": "user", "content": prompt}]
-                            },
-                            timeout=90
-                        )
-                        result = response.json()
-                        if 'content' in result and result['content']:
-                            st.session_state.jcehp_article = result['content'][0]['text']
-                        else:
-                            st.session_state.jcehp_article = f"Error: {result.get('error',{}).get('message','Unknown error')}"
-                    except Exception as e:
-                        st.session_state.jcehp_article = f"Error: {str(e)}"
+                    title_response = requests.post(
+                        "https://api.anthropic.com/v1/messages",
+                        headers={
+                            "Content-Type": "application/json",
+                            "x-api-key": api_key_j,
+                            "anthropic-version": "2023-06-01"
+                        },
+                        json={
+                            "model": "claude-sonnet-4-20250514",
+                            "max_tokens": 100,
+                            "messages": [{"role": "user", "content": title_prompt}]
+                        },
+                        timeout=30
+                    )
+                    title_result = title_response.json()
+                    if 'content' in title_result and title_result['content']:
+                        st.session_state.jcehp_title = title_result['content'][0]['text'].strip()
+                    else:
+                        st.session_state.jcehp_title = f"CME Outcomes in {therapeutic_area}: A Multi-Vendor Analysis"
+
+                except Exception as e:
+                    st.session_state.jcehp_title = f"CME Outcomes in {therapeutic_area}"
+
+            with st.spinner("Step 3 of 3: Writing manuscript..."):
+                try:
+                    article_prompt = f"""Write a complete, publication-ready manuscript for the Journal of Continuing Education in the Health Professions (JCEHP).
+
+JCEHP SUBMISSION CRITERIA (researched):
+{st.session_state.jcehp_criteria or "Standard JCEHP format"}
+
+ARTICLE TITLE:
+{st.session_state.jcehp_title}
+
+PROGRAM OUTCOMES DATA:
+{data_summary}
+
+Write a full manuscript with these sections, adhering strictly to JCEHP style:
+
+STRUCTURED ABSTRACT (250 words max)
+Background: [educational gap addressed]
+Methods: [activity design, assessment approach, statistical methods]  
+Results: [key statistics with n values and p-values]
+Conclusions: [implications for CE/CPD practice]
+
+INTRODUCTION
+- Educational gap and significance (cite relevant literature concepts)
+- Rationale for this CME intervention
+- Study objectives
+
+METHODS
+- Activity design and format
+- Accreditation details (CME/CE)
+- Assessment instruments (pre/post MCQ, Likert, evaluation survey)
+- Data collection (Exchange vendor: n={ex_n}, Nexus vendor: n={nx_n})
+- Statistical analysis approach (chi-square for MCQ, t-test for Likert, descriptive for evaluation)
+
+RESULTS
+- Participant characteristics
+- Knowledge outcomes (all MCQ data with statistics)
+- Competence outcomes (all Likert data with statistics)  
+- Practice change outcomes (intent, behavior change)
+- Program quality (satisfaction, bias-free, content novelty)
+
+DISCUSSION
+- Interpretation of findings in context of CE/CPD literature
+- Comparison to Moore's Framework levels
+- Limitations (interim data, self-reported outcomes, selection bias)
+- Implications for future CE programs
+
+CONCLUSIONS
+
+Use formal academic language. Include all statistics. Write as if submitting for peer review."""
+
+                    article_response = requests.post(
+                        "https://api.anthropic.com/v1/messages",
+                        headers={
+                            "Content-Type": "application/json",
+                            "x-api-key": api_key_j,
+                            "anthropic-version": "2023-06-01"
+                        },
+                        json={
+                            "model": "claude-sonnet-4-20250514",
+                            "max_tokens": 3000,
+                            "messages": [{"role": "user", "content": article_prompt}]
+                        },
+                        timeout=120
+                    )
+                    result = article_response.json()
+                    if 'content' in result and result['content']:
+                        st.session_state.jcehp_article = result['content'][0]['text']
+                    else:
+                        st.session_state.jcehp_article = f"Error: {result.get('error',{}).get('message','Unknown error')}"
+                except Exception as e:
+                    st.session_state.jcehp_article = f"Error writing article: {str(e)}"
+
+        if st.session_state.jcehp_title:
+            st.markdown("---")
+            st.markdown(f"**Generated Title:**")
+            edited_title = st.text_input("Edit title if needed:", 
+                                          value=st.session_state.jcehp_title,
+                                          key="jcehp_title_edit")
+
+        if st.session_state.jcehp_criteria:
+            with st.expander("📋 JCEHP Submission Criteria (researched)", expanded=False):
+                st.markdown(st.session_state.jcehp_criteria)
 
         if st.session_state.jcehp_article:
+            st.markdown("---")
             st.markdown(st.session_state.jcehp_article)
+            full_text = f"TITLE: {st.session_state.jcehp_title}\n\n{st.session_state.jcehp_article}"
             st.download_button(
-                "⬇ Download Article",
-                st.session_state.jcehp_article,
+                "⬇ Download Article Draft",
+                full_text,
                 file_name="JCEHP_Article_Draft.txt",
                 mime="text/plain"
             )
         else:
-            st.info("Enter the program title and click **Write JCEHP Article** to generate a draft manuscript.")
+            st.info("Enter your API key and therapeutic area, then click **Research & Write JCEHP Article**.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
