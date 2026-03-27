@@ -2149,9 +2149,19 @@ def main():
 </style>
 """, unsafe_allow_html=True)
 
-    st.title("📊 Integritas CME Outcomes Harmonizer")
-    st.caption("Tab 1: Merge Exchange + Nexus → combined Excel  |  "
-               "Tab 2: Analyze combined Excel → outcomes dashboard")
+    col_title, col_ver = st.columns([5, 1])
+    with col_title:
+        st.title("📊 Integritas CME Outcomes Harmonizer")
+        st.caption("Tab 1: Merge Exchange + Nexus → combined Excel  |  "
+                   "Tab 2: Analyze combined Excel → outcomes dashboard")
+    with col_ver:
+        st.markdown("""
+<div style="background:#1e3a5f;border:1px solid #3b82f6;border-radius:8px;
+            padding:8px 12px;text-align:center;margin-top:12px">
+  <div style="font-size:9px;color:#64748b;text-transform:uppercase">Version</div>
+  <div style="font-size:13px;font-weight:700;color:#3b82f6">v2.0 — Mar 27</div>
+</div>
+""", unsafe_allow_html=True)
 
     tab_merge, tab_analyze = st.tabs(["🔀  Merger", "📈  Analyzer"])
 
