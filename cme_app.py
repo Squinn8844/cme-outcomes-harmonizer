@@ -118,6 +118,55 @@ body,.stApp{background:#0a0f1e!important}
 .mv{display:flex;align-items:center;gap:8px;background:#16a34a15;border:1px solid #16a34a44;
   border-radius:5px;padding:7px 11px;margin-top:12px;color:#4ade80;font-size:12px}
 
+/* ── FILTER FUNCTIONAL BUTTON ROW ── make them tiny pills */
+div[data-testid="stHorizontalBlock"] > div[data-testid="column"] > div[data-testid="stButton"] > button {
+  padding: 2px 8px !important;
+  border-radius: 20px !important;
+  font-size: 10px !important;
+  font-weight: 500 !important;
+  height: 22px !important;
+  min-height: 0 !important;
+  line-height: 1.2 !important;
+  white-space: nowrap !important;
+}
+
+/* ── GAIN BADGE ── */
+.gain-badge {
+  display: inline-block;
+  padding: 2px 8px; border-radius: 4px;
+  font-size: 12px; font-weight: 700;
+}
+.gain-pos { background: #16a34a20; border: 1px solid #16a34a; color: #4ade80; }
+.gain-neg { background: #dc262620; border: 1px solid #dc2626; color: #f87171; }
+
+/* ── CIRCLE STAT ── large colored number in a ring */
+.big-ring {
+  width: 90px; height: 90px; border-radius: 50%;
+  border: 6px solid; display: flex; align-items: center;
+  justify-content: center; flex-direction: column;
+  margin: 0 auto 8px;
+}
+.big-ring-val { font-size: 22px; font-weight: 800; line-height: 1; }
+.big-ring-sub { font-size: 9px; color: #475569; margin-top: 1px; }
+
+/* ── IMPACT ROW ── horizontal metric strip */
+.impact-strip {
+  display: flex; gap: 0; border: 1px solid #334155;
+  border-radius: 10px; overflow: hidden; margin-bottom: 16px;
+}
+.impact-cell {
+  flex: 1; padding: 14px 16px; text-align: center;
+  border-right: 1px solid #334155; background: #1e293b;
+}
+.impact-cell:last-child { border-right: none; }
+.impact-val { font-size: 28px; font-weight: 700; line-height: 1; }
+.impact-label { color: #64748b; font-size: 10px; text-transform: uppercase;
+  letter-spacing: .5px; margin-top: 3px; }
+
+/* ── KN VISUAL BARS ── cleaner pre/post */
+.kn-pre-bar  { background: #f59e0b; }
+.kn-post-bar { background: #4ade80; }
+
 /* GENERAL */
 h1,h2,h3,p,label{color:#e2e8f0!important}
 .stTextInput input{background:#1e293b!important;border-color:#334155!important;color:#e2e8f0!important}
@@ -821,9 +870,11 @@ def render_upload():
 # ══════════════════════════════════════════════════════════════════════════════
 def render_filter_bar(ex_data, nx_data):
     """
-    Fully clickable pill filter bar — no expander, no hidden buttons.
-    Each pill IS a Streamlit button, styled via CSS to look like a chip.
-    Active pills highlight in their accent color.
+    Single scrollable HTML row of filter pills.
+    Pills are pure HTML links that append ?filter=X to the URL — but since
+    Streamlit doesn't support that easily, we render the visual bar in HTML
+    and place invisible Streamlit buttons right below it inside a zero-height
+    container. We use the 'key' to map each button to its filter value.
     """
     specs, profs = get_filter_options(ex_data, nx_data)
     sf = st.session_state.get('specialty_filter', 'All')
@@ -833,151 +884,104 @@ def render_filter_bar(ex_data, nx_data):
     nx_n  = nx_data['n_pre'] if nx_data else 0
     total = ex_n + nx_n
 
-    # Inject CSS that turns Streamlit buttons into pills.
-    # We target buttons inside specific container divs we wrap below.
+    # ── CSS: override ALL Streamlit buttons in the filter zone to be pills ──
     st.markdown("""
 <style>
-/* pill button base */
-div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button {
-    padding: 3px 12px !important;
-    border-radius: 20px !important;
-    font-size: 11px !important;
-    font-weight: 500 !important;
-    height: auto !important;
-    min-height: 0 !important;
-    line-height: 1.6 !important;
-    white-space: nowrap !important;
-    background: #1e293b !important;
-    border: 1px solid #334155 !important;
-    color: #94a3b8 !important;
-    transition: all .15s !important;
+/* make the filter button row zero-height visually */
+.filter-btn-row { display: none; }
+
+/* Global pill override — applies to ALL st.button calls that use key prefix 'filt_' */
+/* We wrap them in a div with class filter-pill-zone in the HTML, then show them */
+.filter-pill-zone { 
+  background: #0f172a;
+  border-bottom: 1px solid #1e293b;
+  padding: 6px 20px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  overflow-x: auto;
 }
-div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
-    border-color: #22d3ee !important;
-    color: #22d3ee !important;
-    background: #0891b220 !important;
+.filter-pill-zone .flabel {
+  color: #475569; font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .8px;
+  white-space: nowrap; flex-shrink: 0;
 }
-/* active-all */
-div[data-testid="stHorizontalBlock"] div[data-testid="stButton"][data-active-all="true"] button {
-    border-color: #22d3ee !important; color: #22d3ee !important; background: #0891b220 !important;
+.filter-pill-zone .fdiv {
+  width: 1px; height: 16px; background: #334155;
+  margin: 0 4px; flex-shrink: 0;
 }
-/* active-sp (specialty/profession) */
-div[data-testid="stHorizontalBlock"] div[data-testid="stButton"][data-active-sp="true"] button {
-    border-color: #f59e0b !important; color: #f59e0b !important; background: #d9770620 !important;
+.filter-pill-zone .fp {
+  display: inline-flex; align-items: center;
+  padding: 3px 11px; border-radius: 20px; font-size: 11px;
+  border: 1px solid #334155; color: #94a3b8; background: #1e293b;
+  white-space: nowrap; cursor: pointer; flex-shrink: 0;
+  transition: all .12s;
 }
-/* active-ex */
-div[data-testid="stHorizontalBlock"] div[data-testid="stButton"][data-active-ex="true"] button {
-    border-color: #4ade80 !important; color: #4ade80 !important; background: #16a34a20 !important;
-}
-/* active-nx */
-div[data-testid="stHorizontalBlock"] div[data-testid="stButton"][data-active-nx="true"] button {
-    border-color: #a78bfa !important; color: #a78bfa !important; background: #7c3aed20 !important;
-}
-/* label pills (non-clickable) */
-.filter-label-pill {
-    color: #475569; font-size: 10px; font-weight: 700;
-    text-transform: uppercase; letter-spacing: .8px;
-    padding: 3px 0; white-space: nowrap; align-self: center;
-}
-.filter-divider {
-    width: 1px; background: #334155; margin: 0 6px; align-self: stretch;
-}
+.filter-pill-zone .fp:hover { border-color: #22d3ee; color: #22d3ee; }
+.fp-all  { border-color: #22d3ee !important; color: #22d3ee !important; background: #0891b220 !important; }
+.fp-sp   { border-color: #f59e0b !important; color: #f59e0b !important; background: #d9770620 !important; }
+.fp-ex   { border-color: #4ade80 !important; color: #4ade80 !important; background: #16a34a20 !important; }
+.fp-nx   { border-color: #a78bfa !important; color: #a78bfa !important; background: #7c3aed20 !important; }
 </style>
 """, unsafe_allow_html=True)
 
-    # ── FILTER DATA LABEL ──
-    st.markdown('<div style="background:#0f172a;border-bottom:1px solid #1e293b;padding:2px 0 4px 0">', unsafe_allow_html=True)
+    # ── Build the visual pill bar in HTML (display only) ──
+    def pill(label, active_cls=''):
+        cls = f'fp {active_cls}' if active_cls else 'fp'
+        return f'<span class="{cls}">{label}</span>'
 
-    # Build one flat row of pills using st.columns
-    # Count: 1 label + (1+len(specs)) specialty + 1 divider + 1 label + (1+len(profs)) prof + 1 divider + 1 label + 3 vendor
     spec_count = min(len(specs), 8)
     prof_count = min(len(profs), 6)
 
-    # We use a wide column layout: labels get width=1, pills get width=1 each
-    col_widths = (
-        [1]                        # "FILTER DATA" label
-        + [1]                      # Specialty label
-        + [1] * (1 + spec_count)   # All + specs
-        + [1]                      # Profession label
-        + [1] * (1 + prof_count)   # All + profs
-        + [1]                      # Vendor label
-        + [1, 1, 1]                # All, Exchange, Nexus
+    spec_pills = ''.join(pill(s[:16]+('…' if len(s)>16 else ''), 'fp-sp' if sf==s else '') for s in specs[:spec_count])
+    prof_pills = ''.join(pill(p[:12]+('…' if len(p)>12 else ''), 'fp-sp' if pf==p else '') for p in profs[:prof_count])
+
+    st.markdown(f"""
+<div class="filter-pill-zone">
+  <span class="flabel">Filter Data</span>
+  <span class="fdiv"></span>
+  <span class="flabel">Specialty:</span>
+  {pill(f'All ({total})', 'fp-all' if sf=='All' else '')}
+  {spec_pills}
+  <span class="fdiv"></span>
+  <span class="flabel">Profession:</span>
+  {pill('All', 'fp-all' if pf=='All' else '')}
+  {prof_pills}
+  <span class="fdiv"></span>
+  <span class="flabel">Vendor:</span>
+  {pill(f'All ({total})', 'fp-all' if vf=='All' else '')}
+  {pill(f'Exchange ({ex_n})', 'fp-ex' if vf=='Exchange' else '')}
+  {pill(f'Nexus ({nx_n})', 'fp-nx' if vf=='Nexus' else '')}
+</div>
+""", unsafe_allow_html=True)
+
+    # ── Actual clickable buttons hidden via CSS but functional ──
+    # We show them in a compact row below the visual bar
+    st.markdown('<div style="background:#0f172a;padding:2px 20px 4px;display:flex;gap:4px;flex-wrap:wrap;border-bottom:1px solid #1e293b">', unsafe_allow_html=True)
+    
+    # Use minimal columns — just enough to hold all buttons
+    all_filters = (
+        [('sf_all', 'specialty_filter', 'All',      f'🌐 All ({total})')] +
+        [(f'sf_{s}', 'specialty_filter', s, s[:14]) for s in specs[:spec_count]] +
+        [('pf_all', 'profession_filter', 'All',     '👤 All')] +
+        [(f'pf_{p}', 'profession_filter', p, p[:10]) for p in profs[:prof_count]] +
+        [('vf_all', 'vendor_filter', 'All',         f'🔀 All ({total})')] +
+        [('vf_ex',  'vendor_filter', 'Exchange',    f'⬤ Ex ({ex_n})')] +
+        [('vf_nx',  'vendor_filter', 'Nexus',       f'⬤ Nx ({nx_n})')  ]
     )
-    cols = st.columns(col_widths)
-    ci = 0
 
-    # "FILTER DATA" label
-    with cols[ci]:
-        st.markdown('<div class="filter-label-pill">Filter Data</div>', unsafe_allow_html=True)
-    ci += 1
-
-    # SPECIALTY label
-    with cols[ci]:
-        st.markdown('<div class="filter-label-pill">Specialty:</div>', unsafe_allow_html=True)
-    ci += 1
-
-    # Specialty All
-    with cols[ci]:
-        if st.button(f'All ({total})', key='sf_all', use_container_width=True,
-                     type='primary' if sf == 'All' else 'secondary'):
-            st.session_state['specialty_filter'] = 'All'; st.rerun()
-    ci += 1
-
-    for s in specs[:spec_count]:
-        with cols[ci]:
-            label = s[:18] + ('…' if len(s) > 18 else '')
-            if st.button(label, key=f'sf_{s}', use_container_width=True,
-                         type='primary' if sf == s else 'secondary',
-                         help=s):
-                st.session_state['specialty_filter'] = s; st.rerun()
-        ci += 1
-
-    # PROFESSION label
-    with cols[ci]:
-        st.markdown('<div class="filter-label-pill">Profession:</div>', unsafe_allow_html=True)
-    ci += 1
-
-    # Profession All
-    with cols[ci]:
-        if st.button('All', key='pf_all', use_container_width=True,
-                     type='primary' if pf == 'All' else 'secondary'):
-            st.session_state['profession_filter'] = 'All'; st.rerun()
-    ci += 1
-
-    for p in profs[:prof_count]:
-        with cols[ci]:
-            label = p[:14] + ('…' if len(p) > 14 else '')
-            if st.button(label, key=f'pf_{p}', use_container_width=True,
-                         type='primary' if pf == p else 'secondary',
-                         help=p):
-                st.session_state['profession_filter'] = p; st.rerun()
-        ci += 1
-
-    # VENDOR label
-    with cols[ci]:
-        st.markdown('<div class="filter-label-pill">Vendor:</div>', unsafe_allow_html=True)
-    ci += 1
-
-    # Vendor pills
-    for label, key_val, key_id in [
-        (f'All ({total})', 'All',      'vf_all'),
-        (f'Exchange ({ex_n})', 'Exchange', 'vf_ex'),
-        (f'Nexus ({nx_n})',    'Nexus',    'vf_nx'),
-    ]:
-        with cols[ci]:
-            if st.button(label, key=key_id, use_container_width=True,
-                         type='primary' if vf == key_val else 'secondary'):
-                st.session_state['vendor_filter'] = key_val; st.rerun()
-        ci += 1
+    cols = st.columns(len(all_filters))
+    for i, (key, state_key, val, label) in enumerate(all_filters):
+        with cols[i]:
+            active = st.session_state.get(state_key) == val
+            if st.button(label, key=f'filt_{key}', use_container_width=True,
+                         type='primary' if active else 'secondary'):
+                st.session_state[state_key] = val
+                st.rerun()
 
     st.markdown('</div>', unsafe_allow_html=True)
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TABS
-# ══════════════════════════════════════════════════════════════════════════════
-TABS = ['Overview','Knowledge','Competence','Evaluation',
-        'AI Insights','JCEHP Article','CIRCLE Framework','Kirkpatrick','Key Findings']
 
 def render_tabs():
     active = st.session_state.get('tab','Overview')
@@ -994,106 +998,172 @@ def render_tabs():
 # ══════════════════════════════════════════════════════════════════════════════
 def tab_overview(ex_data, nx_data, resp):
     mcq_pairs, lk_pairs = match_questions(ex_data, nx_data)
-    sat  = compute_sat_items(resp)
-    ev_m = compute_eval_metrics(resp)
+    sat   = compute_sat_items(resp)
+    ev_m  = compute_eval_metrics(resp)
+    lo    = compute_lo_items(resp)
 
-    ex_n      = ex_data['n_pre'] if ex_data else 0
-    nx_n      = nx_data['n_pre'] if nx_data else 0
-    ex_post   = ex_data['n_post'] if ex_data else 0
-    nx_post   = nx_data['n_post'] if nx_data else 0
-    total     = ex_n + nx_n
-    matched   = ex_post + nx_post
-    pct_match = round(100*matched/total, 1) if total else 0
+    ex_n    = ex_data['n_pre']  if ex_data else 0
+    nx_n    = nx_data['n_pre']  if nx_data else 0
+    ex_post = ex_data['n_post'] if ex_data else 0
+    nx_post = nx_data['n_post'] if nx_data else 0
+    total   = ex_n + nx_n
+    matched = ex_post + nx_post
+    pct_match = round(100*matched/total,1) if total else 0
     avg_gain  = round(sum(q['gain'] for q in mcq_pairs if q['gain'])/max(1,len(mcq_pairs)),1) if mcq_pairs else 0
     cn_pct    = ev_m.get('content_new',{}).get('pct')
 
-    # Stat cards
-    cards = [
-        ('Total Pre-Test Learners', total,  '#60a5fa',  f'Ex: {ex_n} | Nx: {nx_n}'),
-        ('Pre-Only Learners',       total-matched, '#fb923c', f'Pre-test only, no post/eval'),
-        ('Pre/Post Matched',        matched,'#4ade80',  f'{pct_match}% of pre-test starters'),
-        ('With Evaluation',         len(resp),'#a78bfa', 'Moore Levels 2–4'),
-        ('Avg Knowledge Gain',      f'+{avg_gain}pp','#22d3ee', f'{len(mcq_pairs)} MCQ pairs'),
-        ('Avg % New Content',       f'{cn_pct}%' if cn_pct else '—','#f59e0b', f'n={ev_m.get("content_new",{}).get("n","—")}'),
+    # TOP METRIC STRIP
+    cells = [
+        (str(total),         '#60a5fa', 'Total Pre-Test Learners', f'Ex: {ex_n} | Nx: {nx_n}'),
+        (str(total-matched), '#fb923c', 'Pre-Only Learners',        'No post/eval'),
+        (str(matched),       '#4ade80', 'Pre/Post Matched',          f'{pct_match}% completion'),
+        (str(len(resp)),     '#a78bfa', 'With Evaluation',           'Moore Levels 2-4'),
+        (f'+{avg_gain}pp',   '#22d3ee', 'Avg Knowledge Gain',        f'{len(mcq_pairs)} MCQ pairs'),
+        (f'{cn_pct}%' if cn_pct else '--', '#f59e0b', 'Avg % New Content', f'n={ev_m.get("content_new",{}).get("n","--")}'),
     ]
-    html = '<div class="sc-grid">'
-    for lbl, val, color, sub in cards:
-        html += f'<div class="sc"><div class="sc-label">{lbl}</div><div class="sc-val" style="color:{color}">{val}</div><div class="sc-sub">{sub}</div></div>'
-    st.markdown(html+'</div>', unsafe_allow_html=True)
+    strip = '<div class="impact-strip">'
+    for val, color, label, sub in cells:
+        strip += (
+            '<div class="impact-cell">'
+            f'<div class="impact-val" style="color:{color}">{val}</div>'
+            f'<div class="impact-label">{label}</div>'
+            f'<div style="color:#475569;font-size:9px;margin-top:2px">{sub}</div>'
+            '</div>'
+        )
+    strip += '</div>'
+    st.markdown(strip, unsafe_allow_html=True)
 
-    left, right = st.columns([6,4])
+    left, right = st.columns([6, 4])
 
     with left:
-        st.markdown('<div class="scard"><div class="stitle">Knowledge Gains — Pre vs Post</div>', unsafe_allow_html=True)
+        st.markdown('<div class="scard">', unsafe_allow_html=True)
+        st.markdown('<div class="stitle">Knowledge Gains -- Prior vs. After</div>', unsafe_allow_html=True)
+
         for i, q in enumerate(mcq_pairs):
-            gc = '#4ade80' if (q['gain'] or 0)>=0 else '#f87171'
-            gs = f'+{q["gain"]}pp' if (q["gain"] or 0)>=0 else f'{q["gain"]}pp'
-            pw = min(100, int(q['pre_pct'] or 0))
-            qw = min(100, int(q['post_pct'] or 0))
-            lbl = q['label']
-            st.markdown(f"""
-<div class="kn-item">
-  <div class="kn-q">{lbl[:88]}{'…' if len(lbl)>88 else ''}<span class="kn-gain" style="color:{gc}">{gs}</span></div>
-  <div class="bar-row"><span class="bl">PRE</span><div class="bg"><div class="bf" style="width:{pw}%;background:#f59e0b"></div></div><span class="bp">{q['pre_pct']}%</span></div>
-  <div class="bar-row"><span class="bl">POST</span><div class="bg"><div class="bf" style="width:{qw}%;background:#4ade80"></div></div><span class="bp">{q['post_pct']}%</span></div>
-  <div class="ck-lbl">✓ {q['correct'][:80]}</div>
-</div>""", unsafe_allow_html=True)
+            gain = q['gain'] or 0
+            gc   = '#4ade80' if gain >= 0 else '#f87171'
+            gs   = f'+{gain}pp' if gain >= 0 else f'{gain}pp'
+            bg   = '#16a34a20' if gain >= 0 else '#dc262620'
+            bc   = '#16a34a'   if gain >= 0 else '#dc2626'
+            pw   = min(100, int(q['pre_pct']  or 0))
+            qw   = min(100, int(q['post_pct'] or 0))
+            lbl  = q['label']
+            st.markdown(
+                f'''<div style="padding:12px 0;border-bottom:1px solid #0f172a">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+    <div style="color:#e2e8f0;font-size:13px;line-height:1.4;flex:1;padding-right:12px">
+      {lbl[:88]}{"..." if len(lbl)>88 else ""}</div>
+    <div style="background:{bg};border:1px solid {bc};color:{gc};padding:3px 10px;
+      border-radius:6px;font-size:13px;font-weight:700;white-space:nowrap;flex-shrink:0">{gs}</div>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px;margin:3px 0">
+    <span style="color:#475569;font-size:11px;width:38px;flex-shrink:0">PRE</span>
+    <div style="flex:1;background:#0f172a;border-radius:3px;height:8px">
+      <div style="width:{pw}%;background:#f59e0b;border-radius:3px;height:8px"></div></div>
+    <span style="color:#f59e0b;font-size:12px;font-weight:600;width:42px;text-align:right">{q["pre_pct"]}%</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px;margin:3px 0">
+    <span style="color:#475569;font-size:11px;width:38px;flex-shrink:0">POST</span>
+    <div style="flex:1;background:#0f172a;border-radius:3px;height:8px">
+      <div style="width:{qw}%;background:#4ade80;border-radius:3px;height:8px"></div></div>
+    <span style="color:#4ade80;font-size:12px;font-weight:600;width:42px;text-align:right">{q["post_pct"]}%</span>
+  </div>
+  <div style="color:#475569;font-size:11px;margin-top:4px">Correct: {q["correct"][:70]}</div>
+</div>''', unsafe_allow_html=True)
             if st.button("🔍", key=f'ov_kn_{i}'):
                 st.session_state['modal'] = kn_modal(q); st.rerun()
+
         st.markdown('</div>', unsafe_allow_html=True)
 
     with right:
         # Competence shifts
         if lk_pairs:
-            st.markdown('<div class="scard"><div class="stitle">Competence Shifts</div>', unsafe_allow_html=True)
-            for i, q in enumerate(lk_pairs[:3]):
-                gc = '#4ade80' if (q['gain'] or 0)>=0 else '#f87171'
-                gs = f'+{q["gain"]}' if (q["gain"] or 0)>=0 else str(q["gain"])
-                st.markdown(f'<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid #0f172a"><div style="color:#94a3b8;font-size:12px;flex:1;line-height:1.3">{q["label"][:65]}…</div><span style="color:#a78bfa;font-size:12px;font-weight:600">{q["pre_pct"]}</span><span style="color:#475569;font-size:11px">→</span><span style="color:#22d3ee;font-size:12px;font-weight:600">{q["post_pct"]}</span><span style="color:{gc};font-size:12px;font-weight:700;min-width:38px;text-align:right">{gs}</span></div>', unsafe_allow_html=True)
+            st.markdown('<div class="scard">', unsafe_allow_html=True)
+            st.markdown('<div class="stitle">Competence Shifts</div>', unsafe_allow_html=True)
+            for i, q in enumerate(lk_pairs[:4]):
+                gain = q['gain'] or 0
+                gc   = '#4ade80' if gain >= 0 else '#f87171'
+                gs   = f'+{gain}' if gain >= 0 else str(gain)
+                pre  = q['pre_pct'] or 0
+                post = q['post_pct'] or 0
+                pw   = min(100, int(pre / 5 * 100))
+                qw   = min(100, int(post / 5 * 100))
+                st.markdown(f'''
+<div style="padding:8px 0;border-bottom:1px solid #0f172a">
+  <div style="color:#94a3b8;font-size:11px;line-height:1.3;margin-bottom:5px">{q["label"][:58]}...</div>
+  <div style="display:flex;align-items:center;gap:8px">
+    <div style="text-align:center;min-width:34px">
+      <div style="font-size:15px;font-weight:700;color:#a78bfa">{pre}</div>
+      <div style="font-size:9px;color:#475569">PRE</div></div>
+    <div style="flex:1;background:#0f172a;border-radius:3px;height:6px">
+      <div style="width:{qw}%;background:#22d3ee;border-radius:3px;height:6px"></div></div>
+    <div style="text-align:center;min-width:34px">
+      <div style="font-size:15px;font-weight:700;color:#22d3ee">{post}</div>
+      <div style="font-size:9px;color:#475569">POST</div></div>
+    <div style="font-size:12px;font-weight:700;color:{gc};min-width:34px;text-align:right">{gs}</div>
+  </div>
+</div>''', unsafe_allow_html=True)
                 if st.button("🔍", key=f'ov_lk_{i}'):
                     st.session_state['modal'] = kn_modal(q); st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
 
-        # Eval circles
+        # Eval donut circles in a 2x2 grid
         st.markdown('<div class="scard">', unsafe_allow_html=True)
+        st.markdown('<div class="stitle">Program Impact</div>', unsafe_allow_html=True)
         ev_defs = [
-            ('Intent to\nChange', 'intent', '#22d3ee'),
-            ('Would\nRecommend', 'recommend', '#4ade80'),
-            ('Bias-\nFree', 'bias_free', '#a78bfa'),
-            ('Content\nNew', 'content_new', '#f59e0b'),
+            ('Intent to Change',  'intent',      '#22d3ee'),
+            ('Would Recommend',   'recommend',   '#4ade80'),
+            ('Bias-Free',         'bias_free',   '#a78bfa'),
+            ('Content New',       'content_new', '#f59e0b'),
         ]
-        circ = '<div class="ev-circ-row">'
-        for name, key, color in ev_defs:
-            val = ev_m.get(key,{}).get('pct')
-            nn  = ev_m.get(key,{}).get('n',0)
-            vs  = f'{val}%' if val is not None else '—'
-            circ += f'<div class="ev-c"><div class="ev-ring" style="border-color:{color}"><div class="ev-val" style="color:{color}">{vs}</div></div><div class="ev-name">{name}<br><span style="font-size:9px;color:#334155">(n={nn})</span></div></div>'
-        circ += '</div>'
-        st.markdown(circ, unsafe_allow_html=True)
-
-        ev_cols = st.columns(4)
-        for i, (name, key, color) in enumerate(ev_defs):
-            with ev_cols[i]:
-                pv = ev_m.get(key,{}).get('pct'); nn = ev_m.get(key,{}).get('n',0)
-                if st.button("🔍", key=f'ov_ev_{i}'):
-                    st.session_state['modal'] = ev_modal(name.replace('\n',' '), pv, nn, f'{name.replace(chr(10)," ")} — post-activity evaluation metric.'); st.rerun()
+        grid_cols = st.columns(2)
+        for idx2, (name, key, color) in enumerate(ev_defs):
+            val  = ev_m.get(key, {}).get('pct')
+            nn   = ev_m.get(key, {}).get('n', 0)
+            vs   = f'{val}%' if val is not None else '--'
+            pv   = int(val or 0)
+            circ = round(2 * 3.14159 * 30, 1)
+            dash = round(circ * pv / 100, 1)
+            gap  = round(circ - dash, 1)
+            with grid_cols[idx2 % 2]:
+                st.markdown(f'''
+<div style="text-align:center;padding:6px 0">
+  <svg width="72" height="72" viewBox="0 0 72 72">
+    <circle cx="36" cy="36" r="28" fill="none" stroke="#1e293b" stroke-width="7"/>
+    <circle cx="36" cy="36" r="28" fill="none" stroke="{color}" stroke-width="7"
+      stroke-dasharray="{dash} {gap}" stroke-linecap="round"
+      transform="rotate(-90 36 36)"/>
+    <text x="36" y="40" text-anchor="middle" fill="{color}"
+      font-family="sans-serif" font-size="14" font-weight="800">{vs}</text>
+  </svg>
+  <div style="color:#94a3b8;font-size:10px;margin-top:2px">{name}</div>
+  <div style="color:#334155;font-size:9px">n={nn}</div>
+</div>''', unsafe_allow_html=True)
+                if st.button("🔍", key=f'ov_ev_{idx2}'):
+                    st.session_state['modal'] = ev_modal(name, val, nn, f'{name} -- post-activity metric.'); st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
-        # Satisfaction bars — FULL labels
+        # Satisfaction -- score + thin bar
         if sat:
-            st.markdown('<div class="scard"><div class="stitle">Satisfaction</div>', unsafe_allow_html=True)
+            st.markdown('<div class="scard">', unsafe_allow_html=True)
+            st.markdown('<div class="stitle">Satisfaction (1-5)</div>', unsafe_allow_html=True)
             for i, s in enumerate(sat):
-                pf_v = round(s['mean']/5*100)
-                color = '#22d3ee' if pf_v>=80 else ('#f59e0b' if pf_v>=60 else '#f87171')
-                st.markdown(f'<div class="sat-row"><div class="sat-lbl">{s["label"]}</div><div class="sat-bar"><div class="sat-fill" style="width:{pf_v}%;background:{color}"></div></div><div class="sat-val">{s["mean"]}</div></div>', unsafe_allow_html=True)
+                pf_v  = round(s['mean'] / 5 * 100)
+                color = '#22d3ee' if pf_v >= 80 else ('#f59e0b' if pf_v >= 60 else '#f87171')
+                st.markdown(f'''
+<div style="display:flex;align-items:center;gap:8px;margin:6px 0">
+  <div style="font-size:18px;font-weight:700;color:{color};min-width:38px;text-align:right;flex-shrink:0">{s["mean"]}</div>
+  <div style="flex:1">
+    <div style="color:#94a3b8;font-size:11px;line-height:1.3;margin-bottom:3px">{s["label"]}</div>
+    <div style="background:#0f172a;border-radius:3px;height:5px">
+      <div style="width:{pf_v}%;background:{color};border-radius:3px;height:5px"></div></div>
+  </div>
+</div>''', unsafe_allow_html=True)
                 if st.button("🔍", key=f'ov_sat_{i}'):
                     st.session_state['modal'] = sat_modal(s); st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB: KNOWLEDGE
-# ══════════════════════════════════════════════════════════════════════════════
 def tab_knowledge(ex_data, nx_data):
     mcq, _ = match_questions(ex_data, nx_data)
     st.markdown('<div class="scard"><div class="stitle">Knowledge Assessment — MCQ Pre/Post (Moore Level 3)</div>', unsafe_allow_html=True)
