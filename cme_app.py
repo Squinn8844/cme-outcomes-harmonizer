@@ -653,44 +653,88 @@ def get_filter_options(ex_data, nx_data):
 # MODAL BUILDER
 # ══════════════════════════════════════════════════════════════════════════════
 def build_modal(m):
+    """
+    Render modal as a pinned panel at the top of the page.
+    The close button is a real Streamlit button — always visible and clickable.
+    No reliance on JavaScript onclick for closing.
+    """
     def fmt(v, u=''): return f'{v}{u}' if v is not None else '—'
     def dh(pre, post, u=''):
         if pre is None or post is None: return '—'
-        d = round(post-pre, 1)
+        d = round(post - pre, 1)
         sign = '+' if d >= 0 else ''
         css = 'dp' if d >= 0 else 'dn'
         return f'<span class="{css}">{sign}{d}{u}</span>'
 
+    # ── close bar (always rendered first, always on top) ──
+    close_col, _ = st.columns([1, 8])
+    with close_col:
+        if st.button("✕  Close details", key="modal_close", type="primary"):
+            st.session_state['modal'] = None
+            st.rerun()
+
+    # ── build inner content ──
     srcs = ''
     for src, pre, post, n, u in m.get('sources', []):
-        cls = 'bx-ex' if src=='Exchange' else ('bx-nx' if src=='Nexus' else 'bx-cb')
-        bold = ' style="font-weight:700"' if src=='Combined' else ''
-        srcs += f'<tr{bold}><td><span class="bx {cls}">{src}</span></td><td>{fmt(n)}</td><td>{fmt(pre,u)}</td><td>{fmt(n)}</td><td>{fmt(post,u)}</td><td>{dh(pre,post,u)}</td></tr>'
+        cls  = 'bx-ex' if src == 'Exchange' else ('bx-nx' if src == 'Nexus' else 'bx-cb')
+        bold = ' style="font-weight:700"' if src == 'Combined' else ''
+        srcs += (
+            f'<tr{bold}>'
+            f'<td><span class="bx {cls}">{src}</span></td>'
+            f'<td>{fmt(n)}</td><td>{fmt(pre, u)}</td>'
+            f'<td>{fmt(n)}</td><td>{fmt(post, u)}</td>'
+            f'<td>{dh(pre, post, u)}</td>'
+            f'</tr>'
+        )
 
-    table = f'''<div class="ms">Data Source Breakdown</div>
-<table class="mt"><thead><tr>
-<th>Source</th><th>n Pre</th><th>Pre{m.get("unit","")}</th>
-<th>n Post</th><th>Post{m.get("unit","")}</th><th>Δ</th>
-</tr></thead><tbody>{srcs}</tbody></table>''' if srcs else ''
+    table = (
+        f'<div class="ms">Data Source Breakdown</div>'
+        f'<table class="mt"><thead><tr>'
+        f'<th>Source</th><th>n Pre</th><th>Pre {m.get("unit","")}</th>'
+        f'<th>n Post</th><th>Post {m.get("unit","")}</th><th>Δ</th>'
+        f'</tr></thead><tbody>{srcs}</tbody></table>'
+    ) if srcs else ''
 
-    correct = f'<div style="margin-top:10px;padding:7px 11px;background:#16a34a15;border:1px solid #16a34a44;border-radius:5px;color:#4ade80;font-size:12px">✓ Correct answer: <strong>{m["correct"]}</strong></div>' if m.get('correct') else ''
+    correct = (
+        f'<div style="margin-top:10px;padding:7px 11px;background:#16a34a15;'
+        f'border:1px solid #16a34a44;border-radius:5px;color:#4ade80;font-size:12px">'
+        f'✓ Correct answer: <strong>{m["correct"]}</strong></div>'
+    ) if m.get('correct') else ''
 
-    has_both = any(s[0]=='Exchange' for s in m.get('sources',[])) and any(s[0]=='Nexus' for s in m.get('sources',[]))
-    verified = '<div class="mv">✓ Both Exchange and Nexus data included in combined calculation</div>' if has_both else ''
+    has_both = (
+        any(s[0] == 'Exchange' for s in m.get('sources', [])) and
+        any(s[0] == 'Nexus'    for s in m.get('sources', []))
+    )
+    verified = (
+        '<div class="mv">✓ Both Exchange and Nexus data included in combined calculation</div>'
+    ) if has_both else ''
 
+    # ── render as a pinned card (not a fixed overlay — overlays get cut off by Streamlit) ──
     st.markdown(f"""
-<div class="modal-overlay" onclick="if(event.target===this)this.remove()">
-  <div class="modal-card" onclick="event.stopPropagation()">
-    <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">✕</button>
-    <div class="modal-qtitle">{m.get('title','')}</div>
-    <div class="ms">What It Means</div><div class="md">{m.get('definition','')}</div>
-    <div class="ms">Formula</div><div class="mf">{m.get('formula','')}</div>
-    <div class="ms">Actual Calculation</div><div class="mc">{m.get('calculation','')}</div>
-    {correct}{table}{verified}
-  </div>
-</div>""", unsafe_allow_html=True)
-    if st.button("✕ Close", key="modal_close"):
-        st.session_state['modal'] = None; st.rerun()
+<div style="
+  background:#1a2744;
+  border:2px solid #22d3ee;
+  border-radius:14px;
+  padding:24px 28px;
+  margin-bottom:20px;
+  box-shadow:0 8px 40px rgba(0,0,0,.5);
+">
+  <div class="modal-qtitle" style="padding-right:0;margin-bottom:16px">{m.get('title', '')}</div>
+
+  <div class="ms">What It Means</div>
+  <div class="md">{m.get('definition', '')}</div>
+
+  <div class="ms">Formula</div>
+  <div class="mf">{m.get('formula', '')}</div>
+
+  <div class="ms">Actual Calculation</div>
+  <div class="mc">{m.get('calculation', '')}</div>
+
+  {correct}
+  {table}
+  {verified}
+</div>
+""", unsafe_allow_html=True)
 
 def kn_modal(q):
     u = q.get('unit', '%')
@@ -776,55 +820,157 @@ def render_upload():
 # FILTER BAR
 # ══════════════════════════════════════════════════════════════════════════════
 def render_filter_bar(ex_data, nx_data):
+    """
+    Fully clickable pill filter bar — no expander, no hidden buttons.
+    Each pill IS a Streamlit button, styled via CSS to look like a chip.
+    Active pills highlight in their accent color.
+    """
     specs, profs = get_filter_options(ex_data, nx_data)
     sf = st.session_state.get('specialty_filter', 'All')
     pf = st.session_state.get('profession_filter', 'All')
     vf = st.session_state.get('vendor_filter', 'All')
-
-    ex_n = ex_data['n_pre'] if ex_data else 0
-    nx_n = nx_data['n_pre'] if nx_data else 0
+    ex_n  = ex_data['n_pre'] if ex_data else 0
+    nx_n  = nx_data['n_pre'] if nx_data else 0
     total = ex_n + nx_n
 
-    def chip(label, active_cls, active):
-        cls = f'chip {active_cls}' if active else 'chip'
-        return f'<span class="{cls}">{label}</span>'
+    # Inject CSS that turns Streamlit buttons into pills.
+    # We target buttons inside specific container divs we wrap below.
+    st.markdown("""
+<style>
+/* pill button base */
+div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button {
+    padding: 3px 12px !important;
+    border-radius: 20px !important;
+    font-size: 11px !important;
+    font-weight: 500 !important;
+    height: auto !important;
+    min-height: 0 !important;
+    line-height: 1.6 !important;
+    white-space: nowrap !important;
+    background: #1e293b !important;
+    border: 1px solid #334155 !important;
+    color: #94a3b8 !important;
+    transition: all .15s !important;
+}
+div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
+    border-color: #22d3ee !important;
+    color: #22d3ee !important;
+    background: #0891b220 !important;
+}
+/* active-all */
+div[data-testid="stHorizontalBlock"] div[data-testid="stButton"][data-active-all="true"] button {
+    border-color: #22d3ee !important; color: #22d3ee !important; background: #0891b220 !important;
+}
+/* active-sp (specialty/profession) */
+div[data-testid="stHorizontalBlock"] div[data-testid="stButton"][data-active-sp="true"] button {
+    border-color: #f59e0b !important; color: #f59e0b !important; background: #d9770620 !important;
+}
+/* active-ex */
+div[data-testid="stHorizontalBlock"] div[data-testid="stButton"][data-active-ex="true"] button {
+    border-color: #4ade80 !important; color: #4ade80 !important; background: #16a34a20 !important;
+}
+/* active-nx */
+div[data-testid="stHorizontalBlock"] div[data-testid="stButton"][data-active-nx="true"] button {
+    border-color: #a78bfa !important; color: #a78bfa !important; background: #7c3aed20 !important;
+}
+/* label pills (non-clickable) */
+.filter-label-pill {
+    color: #475569; font-size: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .8px;
+    padding: 3px 0; white-space: nowrap; align-self: center;
+}
+.filter-divider {
+    width: 1px; background: #334155; margin: 0 6px; align-self: stretch;
+}
+</style>
+""", unsafe_allow_html=True)
 
-    spec_chips = ''.join(chip(f'{s}', 'c-sp', sf==s) + ' ' for s in specs[:8])
-    prof_chips = ''.join(chip(f'{p}', 'c-sp', pf==p) + ' ' for p in profs[:6])
+    # ── FILTER DATA LABEL ──
+    st.markdown('<div style="background:#0f172a;border-bottom:1px solid #1e293b;padding:2px 0 4px 0">', unsafe_allow_html=True)
 
-    st.markdown(f"""
-<div class="fbar">
-  <span class="flabel">Specialty:</span>
-  {chip(f'All ({total})', 'c-all', sf=='All')}
-  {spec_chips}
-  <span class="fdiv"></span>
-  <span class="flabel">Profession:</span>
-  {chip('All', 'c-all', pf=='All')}
-  {prof_chips}
-  <span class="fdiv"></span>
-  <span class="flabel">Vendor:</span>
-  {chip(f'All ({total})', 'c-all', vf=='All')}
-  {chip(f'Exchange ({ex_n})', 'c-ex', vf=='Exchange')}
-  {chip(f'Nexus ({nx_n})', 'c-nx', vf=='Nexus')}
-</div>""", unsafe_allow_html=True)
+    # Build one flat row of pills using st.columns
+    # Count: 1 label + (1+len(specs)) specialty + 1 divider + 1 label + (1+len(profs)) prof + 1 divider + 1 label + 3 vendor
+    spec_count = min(len(specs), 8)
+    prof_count = min(len(profs), 6)
 
-    with st.expander("🔽 Apply filters"):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.caption("**Specialty**")
-            if st.button("All specialties", key='sf_all'): st.session_state['specialty_filter']='All'; st.rerun()
-            for s in specs:
-                if st.button(s, key=f'sf_{s}'): st.session_state['specialty_filter']=s; st.rerun()
-        with c2:
-            st.caption("**Profession**")
-            if st.button("All professions", key='pf_all'): st.session_state['profession_filter']='All'; st.rerun()
-            for p in profs:
-                if st.button(p, key=f'pf_{p}'): st.session_state['profession_filter']=p; st.rerun()
-        with c3:
-            st.caption("**Vendor**")
-            if st.button("All vendors", key='vf_all'): st.session_state['vendor_filter']='All'; st.rerun()
-            if st.button("Exchange only", key='vf_ex'): st.session_state['vendor_filter']='Exchange'; st.rerun()
-            if st.button("Nexus only",    key='vf_nx'): st.session_state['vendor_filter']='Nexus'; st.rerun()
+    # We use a wide column layout: labels get width=1, pills get width=1 each
+    col_widths = (
+        [1]                        # "FILTER DATA" label
+        + [1]                      # Specialty label
+        + [1] * (1 + spec_count)   # All + specs
+        + [1]                      # Profession label
+        + [1] * (1 + prof_count)   # All + profs
+        + [1]                      # Vendor label
+        + [1, 1, 1]                # All, Exchange, Nexus
+    )
+    cols = st.columns(col_widths)
+    ci = 0
+
+    # "FILTER DATA" label
+    with cols[ci]:
+        st.markdown('<div class="filter-label-pill">Filter Data</div>', unsafe_allow_html=True)
+    ci += 1
+
+    # SPECIALTY label
+    with cols[ci]:
+        st.markdown('<div class="filter-label-pill">Specialty:</div>', unsafe_allow_html=True)
+    ci += 1
+
+    # Specialty All
+    with cols[ci]:
+        if st.button(f'All ({total})', key='sf_all', use_container_width=True,
+                     type='primary' if sf == 'All' else 'secondary'):
+            st.session_state['specialty_filter'] = 'All'; st.rerun()
+    ci += 1
+
+    for s in specs[:spec_count]:
+        with cols[ci]:
+            label = s[:18] + ('…' if len(s) > 18 else '')
+            if st.button(label, key=f'sf_{s}', use_container_width=True,
+                         type='primary' if sf == s else 'secondary',
+                         help=s):
+                st.session_state['specialty_filter'] = s; st.rerun()
+        ci += 1
+
+    # PROFESSION label
+    with cols[ci]:
+        st.markdown('<div class="filter-label-pill">Profession:</div>', unsafe_allow_html=True)
+    ci += 1
+
+    # Profession All
+    with cols[ci]:
+        if st.button('All', key='pf_all', use_container_width=True,
+                     type='primary' if pf == 'All' else 'secondary'):
+            st.session_state['profession_filter'] = 'All'; st.rerun()
+    ci += 1
+
+    for p in profs[:prof_count]:
+        with cols[ci]:
+            label = p[:14] + ('…' if len(p) > 14 else '')
+            if st.button(label, key=f'pf_{p}', use_container_width=True,
+                         type='primary' if pf == p else 'secondary',
+                         help=p):
+                st.session_state['profession_filter'] = p; st.rerun()
+        ci += 1
+
+    # VENDOR label
+    with cols[ci]:
+        st.markdown('<div class="filter-label-pill">Vendor:</div>', unsafe_allow_html=True)
+    ci += 1
+
+    # Vendor pills
+    for label, key_val, key_id in [
+        (f'All ({total})', 'All',      'vf_all'),
+        (f'Exchange ({ex_n})', 'Exchange', 'vf_ex'),
+        (f'Nexus ({nx_n})',    'Nexus',    'vf_nx'),
+    ]:
+        with cols[ci]:
+            if st.button(label, key=key_id, use_container_width=True,
+                         type='primary' if vf == key_val else 'secondary'):
+                st.session_state['vendor_filter'] = key_val; st.rerun()
+        ci += 1
+
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1263,10 +1409,6 @@ def main():
     if not ex_data and not nx_data:
         render_upload(); return
 
-    # Modal
-    if st.session_state.get('modal'):
-        build_modal(st.session_state['modal'])
-
     # Tabs
     render_tabs()
 
@@ -1288,6 +1430,13 @@ def main():
     pf = st.session_state.get('profession_filter','All')
     render_filter_bar(ex_data, nx_data)
     resp = get_eval_respondents(ex_data, nx_data, sf, pf, vf)
+
+    # Modal renders here — after filters but before tab content.
+    # Returns early so close button is always the first thing on screen.
+    if st.session_state.get('modal'):
+        st.markdown('<div style="height:6px"></div>', unsafe_allow_html=True)
+        build_modal(st.session_state['modal'])
+        return
 
     st.divider()
 
