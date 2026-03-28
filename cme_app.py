@@ -983,6 +983,10 @@ def render_filter_bar(ex_data, nx_data):
     st.markdown('</div>', unsafe_allow_html=True)
 
 
+TABS = ['Overview', 'Knowledge', 'Competence', 'Evaluation',
+        'AI Insights', 'JCEHP Article', 'CIRCLE Framework', 'Kirkpatrick', 'Key Findings']
+
+
 def render_tabs():
     active = st.session_state.get('tab','Overview')
     cols = st.columns(len(TABS))
