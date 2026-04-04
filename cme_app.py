@@ -1110,22 +1110,32 @@ label{color:#94a3b8 !important}
     # ─── KEY FINDINGS ─────────────────────────────────────────────────────────
     with tabs[4]:
         st.markdown('#### KEY FINDINGS — PRIOR VS. AFTER PROGRAM')
+        st.caption('Click any circle or metric for definition, formula, exact numbers, and source breakdown.')
         left, right = st.columns(2)
+
         with left:
             st.markdown('<div style="color:#64748b;font-size:10px;letter-spacing:2px;margin-bottom:12px">PRIOR TO THE PROGRAM</div>', unsafe_allow_html=True)
             for r in mcq:
                 pre = r['pre_pct'] or 0
-                st.markdown(f"""<div style="display:flex;align-items:center;gap:12px;background:#0f172a;border-radius:10px;padding:12px;margin-bottom:8px">
+                pre_c = int(pre * r['pre_n'] / 100) if r['pre_n'] else 0
+                st.markdown(f"""<div style="display:flex;align-items:center;gap:12px;background:#0f172a;border-radius:10px;padding:12px;margin-bottom:4px">
 <div style="width:56px;height:56px;border-radius:50%;background:#3b82f6;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:900;color:white;flex-shrink:0">{pre}%</div>
 <div><div style="font-size:11px;color:#94a3b8">Answered correctly before the program</div>
 <div style="font-size:12px;color:#e2e8f0;margin-top:3px">{r['text'][:65]}...</div>
 <div style="font-size:10px;color:#475569">n={r['pre_n']} pre-test respondents</div></div></div>""", unsafe_allow_html=True)
+                bd = r.get('breakdown', {})
+                src_d = {{src: {{'n Pre': d.get('pre_n',0), 'n Correct': int((d.get('pre_pct') or 0)*d.get('pre_n',0)/100), 'Pre %': f"{d.get('pre_pct')}%" if d.get('pre_pct') else '—'}} for src, d in bd.items()}}
+                detail_popup('mcq', f"PRE: {{r['text'][:50]}}", f"{{pre}}% correct (n={{r['pre_n']}})",
+                             f"Pre: {{pre_c}}/{{r['pre_n']}} = {{pre}}% answered correctly | Correct answer: {{r['correct_answer']}}",
+                             src_data=src_d)
+
         with right:
             st.markdown('<div style="color:#64748b;font-size:10px;letter-spacing:2px;margin-bottom:12px">AFTER PARTICIPATING IN THE PROGRAM</div>', unsafe_allow_html=True)
             for r in mcq:
                 post = r['post_pct'] or 0; pre = r['pre_pct'] or 0
-                rel = round((post-pre)/max(pre,1)*100) if pre > 0 else 0
-                st.markdown(f"""<div style="display:flex;align-items:center;gap:12px;background:#0f172a;border-radius:10px;padding:12px;margin-bottom:8px">
+                rel = round((post - pre) / max(pre, 1) * 100) if pre > 0 else 0
+                post_c = int(post * r['post_n'] / 100) if r['post_n'] else 0
+                st.markdown(f"""<div style="display:flex;align-items:center;gap:12px;background:#0f172a;border-radius:10px;padding:12px;margin-bottom:4px">
 <div style="position:relative;flex-shrink:0">
 <div style="width:56px;height:56px;border-radius:50%;background:#22c55e;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:900;color:white">{post}%</div>
 <div style="position:absolute;bottom:-4px;right:-4px;background:#f59e0b;border-radius:8px;padding:1px 5px;font-size:9px;font-weight:700;color:#000">+{rel}%</div>
@@ -1133,101 +1143,217 @@ label{color:#94a3b8 !important}
 <div><div style="font-size:11px;color:#94a3b8">Answered correctly — <b style="color:#22c55e">{rel}% relative increase</b></div>
 <div style="font-size:12px;color:#e2e8f0;margin-top:3px">{r['text'][:65]}...</div>
 <div style="font-size:10px;color:#475569">n={r['post_n']} matched pre/post</div></div></div>""", unsafe_allow_html=True)
+                bd = r.get('breakdown', {})
+                src_d = {}
+                for src, d in bd.items():
+                    pp = d.get('pre_pct'); qp = d.get('post_pct')
+                    pn = d.get('pre_n',0); qn = d.get('post_n',0)
+                    rel_s = round((qp-pp)/max(pp,1)*100) if qp and pp else 0
+                    src_d[src] = {'n Pre': pn, 'Pre %': f"{pp}%", 'n Post': qn, 'Post %': f"{qp}%",
+                                   'Abs Δ': f"+{round(qp-pp,1)}pp" if qp and pp else '—',
+                                   'Rel Δ': f"+{rel_s}%"}
+                pre_c2 = int(pre*r['pre_n']/100) if r['pre_n'] else 0
+                post_c2 = int(post*r['post_n']/100) if r['post_n'] else 0
+                detail_popup('mcq', f"POST: {r['text'][:50]}", f"{post}% correct (+{rel}% relative)",
+                             f"Post: {post_c2}/{r['post_n']} = {post}% | Relative gain = ({post}−{pre})/{pre}×100 = +{rel}% | {pval_str(r['p_val'])} | Correct answer: {r['correct_answer']}",
+                             src_data=src_d)
 
         st.markdown('---')
-        st.markdown('#### EDUCATIONAL IMPACT')
-        ei1, ei2 = st.columns([3,2])
+        st.markdown('#### EDUCATIONAL IMPACT  (click any metric for details)')
+        ei1, ei2 = st.columns([3, 2])
+
         with ei1:
             intent_m = ev.get('intent', {})
-            st.markdown(f"""<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
-{donut_svg(intent_m.get('pct'), '#a855f7', 70)}
+            ipct = intent_m.get('pct'); in_ = intent_m.get('n', 0)
+            st.markdown(f"""<div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">
+{donut_svg(ipct, '#a855f7', 70)}
 <div><div style="font-size:16px;font-weight:700;color:white">Intend to change practice</div>
-<div style="font-size:12px;color:#64748b">n={intent_m.get('n',0)} evaluators</div></div></div>""", unsafe_allow_html=True)
+<div style="font-size:12px;color:#64748b">n={in_} evaluators</div></div></div>""", unsafe_allow_html=True)
+            detail_popup('intent', 'Intent to Change Practice', f"{ipct}% (n={in_})",
+                         f"COUNT(Agree + Strongly Agree) / {in_} = {ipct}%",
+                         df=df_f, col_name=intent_m.get('col'))
             bc = ev.get('behavior_change', {})
             if bc:
                 total_bc = sum(bc.values())
-                html = ''
                 for item, cnt in list(sorted(bc.items(), key=lambda x: x[1], reverse=True))[:5]:
-                    html += prog_bar(round(100*cnt/max(total_bc,1)), '#f59e0b', item[:50])
-                st.markdown(html, unsafe_allow_html=True)
+                    pct_bc = round(100 * cnt / max(total_bc, 1))
+                    st.markdown(prog_bar(pct_bc, '#f59e0b', item[:50]), unsafe_allow_html=True)
+                    detail_popup('behavior_change', item[:50], f"{cnt} ({pct_bc}%)",
+                                 f"{cnt} / {total_bc} evaluators selected this behavior change = {pct_bc}%",
+                                 extra={'Count': cnt, 'Total citing behavior changes': total_bc})
+
         with ei2:
             bias_m = ev.get('bias_free', {}); new_m = ev.get('content_new', {})
-            st.markdown(f"""<div style="display:flex;gap:12px;flex-wrap:wrap">
-<div style="text-align:center">{donut_svg(bias_m.get('pct'), '#3b82f6', 80)}<div style="font-size:10px;color:#64748b">Bias-free</div></div>
-<div style="text-align:center">{donut_svg(new_m.get('pct'), '#f59e0b', 80)}<div style="font-size:10px;color:#64748b">New to learners</div></div>
-</div>
-<div style="text-align:center;margin-top:16px;background:#0f172a;border-radius:10px;padding:16px">
+            bpct = bias_m.get('pct'); bn = bias_m.get('n', 0)
+            npct = new_m.get('pct'); nn_ = new_m.get('n', 0)
+            st.markdown(f"""<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:4px">
+<div style="text-align:center">{donut_svg(bpct, '#3b82f6', 80)}<div style="font-size:10px;color:#64748b">Bias-free</div></div>
+<div style="text-align:center">{donut_svg(npct, '#f59e0b', 80)}<div style="font-size:10px;color:#64748b">New to learners</div></div>
+</div>""", unsafe_allow_html=True)
+            c_b1, c_b2 = st.columns(2)
+            with c_b1:
+                detail_popup('bias_free', 'Free of Commercial Bias', f"{bpct}% (n={bn})",
+                             f"COUNT(Yes) / {bn} = {bpct}% rated content free of bias",
+                             df=df_f, col_name=bias_m.get('col'))
+            with c_b2:
+                detail_popup('content_new', 'Content New to Learners', f"{npct}% (n={nn_})",
+                             f"MEAN of % new ratings across {nn_} respondents = {npct}%",
+                             extra={'n respondents': nn_, 'Mean % new': f"{npct}%"})
+            gains_str = ' + '.join([str(r['gain']) for r in mcq if r['gain']])
+            st.markdown(f"""<div style="text-align:center;margin-top:8px;background:#0f172a;border-radius:10px;padding:16px">
 <div style="font-size:36px;font-weight:900;color:#22c55e">+{avg_gain}pp</div>
 <div style="font-size:12px;color:#64748b">Average knowledge gain across {len(mcq)} questions</div>
 </div>""", unsafe_allow_html=True)
+            detail_popup('mcq', 'Average Knowledge Gain', f"+{avg_gain}pp",
+                         f"({gains_str}) / {len(mcq)} questions = +{avg_gain}pp average",
+                         extra={f"Q{i+1}": f"+{r['gain']}pp — {r['text'][:40]}" for i,r in enumerate(mcq) if r['gain']})
 
     # ─── KIRKPATRICK ──────────────────────────────────────────────────────────
     with tabs[5]:
         st.markdown('#### Kirkpatrick Four-Level Evaluation Model')
-        st.caption('Maps your program outcomes to the most widely recognized CE evaluation framework.')
+        st.caption('Click any metric for definition, formula, and source breakdown.')
 
         with st.expander('**1 — Reaction** | Did participants find the program engaging and relevant?', expanded=True):
             kc = st.columns(4)
-            for col, (lbl, mk, color) in zip(kc, [
-                ('Would Recommend','recommend','#22c55e'), ('Bias-Free','bias_free','#3b82f6'),
-                ('Content New','content_new','#f59e0b'), ('Eval Completion',None,'#a855f7'),
-            ]):
-                pct = ev.get(mk, {}).get('pct') if mk else round(100*has_eval/max(total_n,1))
+            kirk_items = [
+                ('Would Recommend', 'recommend', '#22c55e'),
+                ('Bias-Free',       'bias_free',  '#3b82f6'),
+                ('Content New',     'content_new','#f59e0b'),
+                ('Eval Completion',  None,         '#a855f7'),
+            ]
+            for col, (lbl, mk, color) in zip(kc, kirk_items):
+                if mk:
+                    m = ev.get(mk, {}); pct = m.get('pct'); n = m.get('n', 0)
+                else:
+                    pct = round(100*has_eval/max(total_n,1)); n = has_eval
                 col.markdown(f'<div style="text-align:center">{donut_svg(pct, color, 80)}<div style="font-size:10px;color:#64748b;margin-top:4px">{lbl}</div></div>', unsafe_allow_html=True)
+                col.write('')
+                if mk:
+                    detail_popup(mk, lbl, f"{pct}% (n={n})",
+                                 f"COUNT(positive responses) / {n} = {pct}%",
+                                 df=df_f, col_name=ev.get(mk,{}).get('col'))
+                else:
+                    detail_popup('with_eval', lbl, f"{pct}% (n={n})",
+                                 f"{has_eval} / {total_n} = {pct}% completed the evaluation survey",
+                                 extra={'Completed eval': has_eval, 'Total pre-test': total_n})
             st.info('💡 High recommendation rate and low bias scores establish the credibility floor that makes Levels 2–4 findings defensible to pharma reviewers.')
 
         with st.expander('**2 — Learning** | Did participants acquire knowledge and skills?', expanded=True):
-            st.markdown('**Knowledge acquisition — % correct responses pre vs post**')
+            st.markdown('**Knowledge acquisition — % correct responses pre vs post  (click for details)**')
             for r in mcq:
                 st.markdown(f"**{r['text'][:70]}**")
-                st.markdown(prog_bar(r['pre_pct'] or 0,'#475569',f'PRE  {r["pre_pct"]}%') + prog_bar(r['post_pct'] or 0,'#22c55e',f'POST  {r["post_pct"]}%  +{r["gain"]}pp'), unsafe_allow_html=True)
-                if r['correct_answer']: st.caption(f'✓ {r["correct_answer"]}')
+                st.markdown(prog_bar(r['pre_pct'] or 0,'#475569',f'PRE  {r["pre_pct"]}%  (n={r["pre_n"]})') +
+                             prog_bar(r['post_pct'] or 0,'#22c55e',f'POST  {r["post_pct"]}%  +{r["gain"]}pp  (n={r["post_n"]})'), unsafe_allow_html=True)
+                if r['correct_answer']: st.caption(f'✓ Correct answer: {r["correct_answer"]}')
+                bd = r.get('breakdown', {})
+                src_d = {}
+                for src, d in bd.items():
+                    pp = d.get('pre_pct'); qp = d.get('post_pct')
+                    pn = d.get('pre_n',0); qn = d.get('post_n',0)
+                    src_d[src] = {'n Pre': pn, 'Pre %': f"{pp}%", 'n Post': qn, 'Post %': f"{qp}%",
+                                   'Δ': f"+{round(qp-pp,1)}pp" if qp and pp else '—'}
+                pre_c = int((r['pre_pct'] or 0)*r['pre_n']/100)
+                post_c = int((r['post_pct'] or 0)*r['post_n']/100)
+                detail_popup('mcq', r['text'][:60], f"Pre:{r['pre_pct']}% → Post:{r['post_pct']}% (+{r['gain']}pp)",
+                             f"Pre: {pre_c}/{r['pre_n']} = {r['pre_pct']}% → Post: {post_c}/{r['post_n']} = {r['post_pct']}% | Δ+{r['gain']}pp | {pval_str(r['p_val'])}",
+                             src_data=src_d)
             if likert:
-                st.markdown('**Competence shifts — Likert mean 1–5**')
+                st.markdown('**Competence shifts — Likert mean 1–5  (click for details)**')
                 for r in likert:
-                    st.markdown(f"**{r['text'][:55]}** — {r['pre_mean']} → {r['post_mean'] or '—'} (+{r['delta'] or '—'})")
+                    st.markdown(f"**{r['text'][:55]}** — {r['pre_mean']} → {r['post_mean'] or '—'} (Δ{r['delta'] or '—'})")
+                    detail_popup('likert', r['text'][:55], f"{r['pre_mean']} → {r['post_mean'] or '—'}",
+                                 f"Pre mean = {r['pre_mean']} (n={r['pre_n']}) | Post mean = {r['post_mean'] or 'N/A'} (n={r['post_n']}) | Δ = {r['delta'] or '—'} | {pval_str(r['p_val'])}",
+                                 extra={'Pre n': r['pre_n'], 'Post n': r['post_n'], 'p-value': pval_str(r['p_val'])})
 
         with st.expander('**3 — Behavior** | Did participants intend to apply what they learned?', expanded=True):
-            kc3 = st.columns([1,3])
+            kc3 = st.columns([1, 3])
             with kc3[0]:
                 intent_m = ev.get('intent', {})
-                st.markdown(donut_svg(intent_m.get('pct'), '#a855f7', 90), unsafe_allow_html=True)
-                st.markdown(f"<div style='text-align:center;font-size:12px;color:#94a3b8'>Intent to Change<br>n={intent_m.get('n',0)}</div>", unsafe_allow_html=True)
+                ipct = intent_m.get('pct'); in_ = intent_m.get('n', 0)
+                st.markdown(donut_svg(ipct, '#a855f7', 90), unsafe_allow_html=True)
+                st.markdown(f"<div style='text-align:center;font-size:12px;color:#94a3b8'>Intent to Change<br>n={in_}</div>", unsafe_allow_html=True)
+                detail_popup('intent', 'Intent to Change Practice', f"{ipct}% (n={in_})",
+                             f"COUNT(Agree + Strongly Agree) / {in_} = {ipct}%",
+                             df=df_f, col_name=intent_m.get('col'))
             with kc3[1]:
                 bc = ev.get('behavior_change', {})
                 if bc:
-                    st.markdown('**Planned behavior changes:**')
+                    st.markdown('**Planned behavior changes  (click each for details):**')
                     total_bc = sum(bc.values())
                     for item, cnt in sorted(bc.items(), key=lambda x: x[1], reverse=True)[:5]:
-                        st.markdown(prog_bar(round(100*cnt/max(total_bc,1)), '#f59e0b', f"{item[:55]}"), unsafe_allow_html=True)
+                        pct_bc = round(100*cnt/max(total_bc,1))
+                        st.markdown(prog_bar(pct_bc, '#f59e0b', f"{item[:55]} ({cnt})"), unsafe_allow_html=True)
+                        detail_popup('behavior_change', item[:55], f"{cnt} respondents ({pct_bc}%)",
+                                     f"{cnt} / {total_bc} evaluators selected this planned behavior change = {pct_bc}%",
+                                     extra={'Count': cnt, 'Total behavior responses': total_bc})
 
         with st.expander('**4 — Results** | Did learners actually change their practice?', expanded=True):
+            detail_popup('followup', 'Follow-Up Respondents', str(has_fu),
+                         f"{has_fu} respondents completed the follow-up survey (Moore Level 5)",
+                         extra={'Follow-up n': has_fu, 'Total pre-test n': total_n,
+                                'Follow-up rate': f"{round(100*has_fu/max(total_n,1))}%"})
             if has_fu > 0:
-                st.metric('Follow-Up Respondents', has_fu)
-                st.success('Follow-up data collected — reflects actual practice change.')
+                st.success('Follow-up data collected — reflects actual practice change at Moore Level 5.')
             else:
                 st.info('No follow-up data available for this program.')
 
     # ─── CIRCLE ───────────────────────────────────────────────────────────────
     with tabs[6]:
         st.markdown('#### CIRCLE Framework for CE/CPD Outcomes')
-        st.caption('ACEhp Almanac · 6 dimensions mapped from your existing data')
+        st.caption('ACEhp Almanac · 6 dimensions mapped from your data — click any card for definition and calculation.')
         barrier_count = len(ev.get('barrier_patient',{})) + len(ev.get('barrier_provider',{})) + len(ev.get('barrier_system',{}))
+        gains_str = ' + '.join([str(r['gain']) for r in mcq if r['gain']])
+
         circle_dims = [
-            ('C','Clinician engagement', f"{round(100*has_eval/max(total_n,1))}%", 'completion rate', '#3b82f6'),
-            ('I','Impact on learning',   f"+{avg_gain}pp", 'avg knowledge gain', '#22c55e'),
-            ('R','Relevance to gaps',    f"{ev.get('content_new',{}).get('pct','—')}%", 'content was new', '#f59e0b'),
-            ('C','Change in behavior',   f"{ev.get('intent',{}).get('pct','—')}%", 'intent to change', '#a855f7'),
-            ('L','Linkage to patients',  f"{round(100*has_post/max(total_n,1))}%", 'practice ready', '#06b6d4'),
-            ('E','Ecosystem factors',    str(barrier_count), 'distinct barriers identified', '#ec4899'),
+            ('C', 'Clinician engagement',
+             f"{round(100*has_eval/max(total_n,1))}%", 'completion rate', '#3b82f6',
+             'with_eval', f"{has_eval}/{total_n} = {round(100*has_eval/max(total_n,1))}% completed the evaluation",
+             {'Exchange': {'n eval': int(df_f[df_f['_source']=='Exchange']['_has_eval'].apply(lambda v: str(v).lower() in ('true','yes','1')).sum()), 'n total': ex_cnt},
+              'Nexus':    {'n eval': int(df_f[df_f['_source']=='Nexus']['_has_eval'].apply(lambda v: str(v).lower() in ('true','yes','1')).sum()), 'n total': nx_cnt},
+              'Combined': {'n eval': has_eval, 'n total': total_n}}),
+
+            ('I', 'Impact on learning',
+             f"+{avg_gain}pp", 'avg knowledge gain', '#22c55e',
+             'mcq', f"({gains_str}) / {len(mcq)} questions = +{avg_gain}pp average gain",
+             {f"Q{i+1}": {'gain': f"+{r['gain']}pp", 'pre': f"{r['pre_pct']}%", 'post': f"{r['post_pct']}%"} for i,r in enumerate(mcq)}),
+
+            ('R', 'Relevance to gaps',
+             f"{ev.get('content_new',{}).get('pct','—')}%", 'content was new', '#f59e0b',
+             'content_new', f"MEAN(% new ratings) = {ev.get('content_new',{}).get('pct','—')}% (n={ev.get('content_new',{}).get('n',0)})",
+             None),
+
+            ('C', 'Change in behavior',
+             f"{ev.get('intent',{}).get('pct','—')}%", 'intent to change', '#a855f7',
+             'intent', f"COUNT(Agree+SA) / {ev.get('intent',{}).get('n',0)} = {ev.get('intent',{}).get('pct','—')}%",
+             None),
+
+            ('L', 'Linkage to patients',
+             f"{round(100*has_post/max(total_n,1))}%", 'pre/post completion', '#06b6d4',
+             'pre_post', f"{has_post}/{total_n} = {round(100*has_post/max(total_n,1))}% completed both pre and post",
+             {'Exchange': {'n post': int(df_f[df_f['_source']=='Exchange']['_has_post'].apply(lambda v: str(v).lower() in ('true','yes','1')).sum()), 'n total': ex_cnt},
+              'Nexus':    {'n post': int(df_f[df_f['_source']=='Nexus']['_has_post'].apply(lambda v: str(v).lower() in ('true','yes','1')).sum()), 'n total': nx_cnt},
+              'Combined': {'n post': has_post, 'n total': total_n}}),
+
+            ('E', 'Ecosystem factors',
+             str(barrier_count), 'distinct barriers identified', '#ec4899',
+             'barrier', f"{barrier_count} distinct barrier items identified across patient, provider, and system levels",
+             {'Patient-level': {'count': len(ev.get('barrier_patient',{}))},
+              'Provider-level': {'count': len(ev.get('barrier_provider',{}))},
+              'System-level':   {'count': len(ev.get('barrier_system',{}))}}),
         ]
+
         r1c = st.columns(3); r2c = st.columns(3)
-        for col, (letter, name, val, sub, color) in zip(r1c+r2c, circle_dims):
-            col.markdown(f"""<div style="background:#0f172a;border:1px solid {color}33;border-radius:14px;padding:20px 16px;text-align:center;margin-bottom:8px">
+        for col, (letter, name, val, sub, color, mk, actual, src_d) in zip(r1c+r2c, circle_dims):
+            col.markdown(f"""<div style="background:#0f172a;border:1px solid {color}33;border-radius:14px;padding:20px 16px;text-align:center;margin-bottom:4px">
 <div style="font-size:32px;font-weight:900;color:{color};margin-bottom:4px">{letter}</div>
 <div style="font-size:11px;color:#64748b;margin-bottom:8px">{name}</div>
 <div style="font-size:24px;font-weight:800;color:white;margin-bottom:4px">{val}</div>
 <div style="font-size:10px;color:#475569">{sub}</div></div>""", unsafe_allow_html=True)
+            col.write('')
+            detail_popup(mk, f"CIRCLE — {name}", val, actual,
+                         src_data=src_d if src_d else None,
+                         df=df_f if src_d is None else None,
+                         col_name=ev.get(mk,{}).get('col') if src_d is None else None)
 
     # ─── AI INSIGHTS ──────────────────────────────────────────────────────────
     with tabs[7]:
