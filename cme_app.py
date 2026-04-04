@@ -1166,56 +1166,146 @@ def main():
 
     st.markdown("---")
 
-    # ── Upload sidebar ────────────────────────────────────────────────────────
+    # ── File uploaders always live in sidebar (accessible after load too) ─────
     with st.sidebar:
-        st.markdown("### 📁 Upload Files")
-        key_file   = st.file_uploader("Question Key (.xlsx)", type=["xlsx"], key="key_up")
-        exch_file  = st.file_uploader("Exchange Data (.xlsx)", type=["xlsx"], key="exch_up")
-        nexus_file = st.file_uploader("Nexus Data (.xlsx)", type=["xlsx"], key="nexus_up")
-
-        if st.button("⚡ Run Analysis", type="primary", use_container_width=True):
-            if not key_file or not exch_file or not nexus_file:
-                st.error("Please upload all 3 files.")
+        st.markdown("### 📁 Re-Upload Files")
+        sb_key  = st.file_uploader("Question Key (.xlsx)",  type=["xlsx"], key="sb_key_up")
+        sb_exch = st.file_uploader("Exchange Data (.xlsx)", type=["xlsx"], key="sb_exch_up")
+        sb_nex  = st.file_uploader("Nexus Data (.xlsx)",    type=["xlsx"], key="sb_nex_up")
+        if st.button("⚡ Re-Run Analysis", type="primary", use_container_width=True):
+            _files = (sb_key, sb_exch, sb_nex)
+            if not all(_files):
+                st.error("Upload all 3 files first.")
             else:
-                with st.spinner("Parsing files…"):
+                with st.spinner("Parsing…"):
                     try:
-                        qs = parse_key_file(key_file)
-                        er = parse_exchange_file(exch_file)
-                        nr = parse_nexus_file(nexus_file)
-                        st.session_state.questions = qs
-                        st.session_state.records   = er + nr
-                        st.session_state.key_name  = key_file.name
-                        st.session_state.exch_name = exch_file.name
-                        st.session_state.nexus_name = nexus_file.name
-                        st.session_state.analytics = compute_analytics(qs, er + nr)
+                        qs = parse_key_file(sb_key)
+                        er = parse_exchange_file(sb_exch)
+                        nr = parse_nexus_file(sb_nex)
+                        st.session_state.questions   = qs
+                        st.session_state.records     = er + nr
+                        st.session_state.key_name    = sb_key.name
+                        st.session_state.exch_name   = sb_exch.name
+                        st.session_state.nexus_name  = sb_nex.name
+                        st.session_state.analytics   = compute_analytics(qs, er + nr)
                         st.session_state.ai_insights = None
                         st.session_state.jcehp_text  = None
                         st.success(f"✓ {len(qs)} questions | {len(er+nr)} learners")
+                        st.rerun()
                     except Exception as e:
                         st.error(f"Parse error: {e}")
                         import traceback; st.code(traceback.format_exc())
-
         if an:
             st.markdown("---")
-            st.markdown("**Quick Stats**")
             st.metric("Total Learners", an["total"])
             st.metric("Avg Knowledge Gain", f"{an['avgKnowledgeGain']}pp")
             st.metric("Intent to Change", f"{an['intendChangePct']}%")
 
-    # ── No data state ─────────────────────────────────────────────────────────
+    # ── No data → show full-page upload panel ─────────────────────────────────
     if not an:
         st.markdown("""
-        <div style="text-align:center;padding:60px 20px;">
-          <div style="font-size:4rem;margin-bottom:16px;">📊</div>
-          <div style="font-size:1.3rem;font-weight:600;color:#e2e8f0;margin-bottom:8px;">
-            Integritas CME Outcomes Harmonizer
+        <div style="text-align:center;padding:32px 0 16px;">
+          <div style="font-size:3rem;margin-bottom:10px;">📊</div>
+          <div style="font-size:1.5rem;font-weight:800;color:#e2e8f0;margin-bottom:6px;">
+            <span style="color:#3b82f6;">Integritas</span> CME Outcomes Harmonizer
           </div>
-          <div style="color:#64748b;font-size:0.9rem;max-width:500px;margin:0 auto;">
-            Upload your Question Key, Exchange data, and Nexus data files using the sidebar,
-            then click <strong>Run Analysis</strong> to generate your outcomes dashboard.
+          <div style="color:#64748b;font-size:0.88rem;">
+            Upload your 3 source files below to generate the full outcomes dashboard.
           </div>
         </div>
         """, unsafe_allow_html=True)
+
+        # Upload panel — 3 columns, prominently in the main body
+        up_left, up_mid, up_right = st.columns(3)
+
+        with up_left:
+            st.markdown("""
+            <div style="background:#0f1e3a;border:1px solid #1e3a5f;border-radius:10px;
+                        padding:16px 16px 8px;margin-bottom:4px;">
+              <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:.08em;
+                          color:#3b82f6;font-weight:700;margin-bottom:6px;">
+                📋 FILE 1 — QUESTION KEY
+              </div>
+              <div style="color:#94a3b8;font-size:0.75rem;margin-bottom:10px;">
+                Exchange survey definition (.xlsx)<br/>
+                Contains question text, correct answers, and scoring flags.
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+            key_file = st.file_uploader("Question Key", type=["xlsx"], key="key_up", label_visibility="collapsed")
+
+        with up_mid:
+            st.markdown("""
+            <div style="background:#0f1e3a;border:1px solid #1e3a5f;border-radius:10px;
+                        padding:16px 16px 8px;margin-bottom:4px;">
+              <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:.08em;
+                          color:#22c55e;font-weight:700;margin-bottom:6px;">
+                📗 FILE 2 — EXCHANGE DATA
+              </div>
+              <div style="color:#94a3b8;font-size:0.75rem;margin-bottom:10px;">
+                Exchange respondent file (.xlsx)<br/>
+                3-row header with PRE / POST / EVALUATION banners.
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+            exch_file = st.file_uploader("Exchange Data", type=["xlsx"], key="exch_up", label_visibility="collapsed")
+
+        with up_right:
+            st.markdown("""
+            <div style="background:#0f1e3a;border:1px solid #1e3a5f;border-radius:10px;
+                        padding:16px 16px 8px;margin-bottom:4px;">
+              <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:.08em;
+                          color:#a855f7;font-weight:700;margin-bottom:6px;">
+                📘 FILE 3 — NEXUS DATA
+              </div>
+              <div style="color:#94a3b8;font-size:0.75rem;margin-bottom:10px;">
+                Nexus multi-sheet respondent file (.xlsx)<br/>
+                Sheets: Pre-Test · Post · Eval · Follow Up
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+            nexus_file = st.file_uploader("Nexus Data", type=["xlsx"], key="nexus_up", label_visibility="collapsed")
+
+        # Status indicators
+        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+        si1, si2, si3 = st.columns(3)
+        for col, f, label in [(si1, key_file, "Question Key"), (si2, exch_file, "Exchange Data"), (si3, nexus_file, "Nexus Data")]:
+            col.markdown(
+                f"<div style='text-align:center;font-size:0.8rem;color:{'#22c55e' if f else '#475569'};'>"
+                f"{'✅' if f else '⬜'} {label}{'  ✓' if f else ''}</div>",
+                unsafe_allow_html=True
+            )
+
+        st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
+
+        # Run button — centered
+        _, btn_col, _ = st.columns([2, 2, 2])
+        with btn_col:
+            run_clicked = st.button("⚡  Run Analysis", type="primary", use_container_width=True)
+
+        if run_clicked:
+            if not key_file or not exch_file or not nexus_file:
+                missing = [n for n, f in [("Question Key", key_file), ("Exchange Data", exch_file), ("Nexus Data", nexus_file)] if not f]
+                st.error(f"Still missing: {', '.join(missing)}")
+            else:
+                with st.spinner("Parsing files and computing analytics…"):
+                    try:
+                        qs = parse_key_file(key_file)
+                        er = parse_exchange_file(exch_file)
+                        nr = parse_nexus_file(nexus_file)
+                        st.session_state.questions   = qs
+                        st.session_state.records     = er + nr
+                        st.session_state.key_name    = key_file.name
+                        st.session_state.exch_name   = exch_file.name
+                        st.session_state.nexus_name  = nexus_file.name
+                        st.session_state.analytics   = compute_analytics(qs, er + nr)
+                        st.session_state.ai_insights = None
+                        st.session_state.jcehp_text  = None
+                        st.success(f"✓ Parsed {len(qs)} questions and {len(er+nr):,} learner records. Loading dashboard…")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Parse error: {e}")
+                        import traceback; st.code(traceback.format_exc())
         return
 
     # ── Filter bar ────────────────────────────────────────────────────────────
