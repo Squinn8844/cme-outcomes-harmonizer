@@ -274,8 +274,9 @@ def parse_key_file(uploaded_file):
 
     questions = []
     for row in rows[1:]:  # skip header
-        if not row or row[0] is None:
+        if not row:
             continue
+        # rowid (col0) may be None — qualify on question text col6 instead
         # columns: rowid(0), Questionnaire(1), Type(2), Score(3), Orientation(4), Sort(5), Question(6), Answers(7), answer cols...
         try:
             rowid      = row[0]
@@ -305,8 +306,17 @@ def parse_key_file(uploaded_file):
         else:
             section = "eval"  # default
 
-        is_mcq = (str(score_val).strip() == "1")
-        is_likert = ("likert" in q_type.lower() or "likert" in orientation.lower())
+        # Score=1 = explicit MCQ; also detect from answer structure (* marker + single/multiple type)
+        has_star = any(str(c).startswith("*") for c in row[7:] if c is not None)
+        is_mcq = (str(score_val).strip() == "1") or (
+            has_star and q_type.lower() in ("single","multiple","radio","checkbox","mcq"))
+        # Likert: explicit label OR frequency/confidence/agreement answer patterns
+        LIKERT_HINTS = {"never","always","% of the time","confident","competent",
+                        "strongly agree","strongly disagree","agree","disagree","neutral",
+                        "minimally","moderately","mostly","very confident","not confident"}
+        ans_text_lower = " ".join(str(c) for c in row[7:] if c is not None).lower()
+        is_likert = ("likert" in q_type.lower() or "likert" in orientation.lower() or
+                     any(h in ans_text_lower for h in LIKERT_HINTS))
 
         # parse answers from the row (cols 7 onward can also hold answers)
         options = []
@@ -363,12 +373,15 @@ def parse_exchange_file(uploaded_file):
     row2 = rows[2]  # question text
 
     # Detect section boundaries from row1
+    # Strip   (non-breaking space) — Exchange uses it as blank filler
     col_section = {}
     current_section = None
     for ci, cell in enumerate(row1):
         if cell:
-            v = str(cell).upper()
-            if "PRE" in v and "POST" not in v:
+            v = str(cell).replace(" ", "").strip().upper()
+            if not v:
+                pass  # blank filler — keep current_section
+            elif "PRE" in v and "POST" not in v:
                 current_section = "pre"
             elif "POST" in v:
                 current_section = "post"
@@ -433,7 +446,14 @@ def parse_nexus_file(uploaded_file):
 
     master = {}  # id -> rec
 
-    META_KEYS = ["specialty", "credentials", "practice_type", "years"]
+    # Meta column keywords — matched against lowercased column headers
+    META_PATTERNS = {
+        "specialty":      ["specialty", "speciality", "speciali"],
+        "credentials":    ["credential", "degree", "profession"],
+        "practice_type":  ["practice type", "practice setting", "setting"],
+        "years":          ["how long", "years in practice", "years of practice", "been in practice"],
+        "patients":       ["how many patients", "patient volume", "patients per"],
+    }
 
     for sec, sheet_name in SHEET_MAP.items():
         ws = wb[sheet_name]
@@ -457,13 +477,19 @@ def parse_nexus_file(uploaded_file):
                 if col_name.startswith("---"):
                     continue
                 val = str(cell).strip() if cell is not None else ""
-                # meta columns heuristic
                 col_lower = col_name.lower()
-                if any(m in col_lower for m in META_KEYS):
-                    key_found = next((m for m in META_KEYS if m in col_lower), col_lower)
-                    rec["meta"][key_found] = val
+                # Check meta patterns
+                meta_key = None
+                for mk, patterns in META_PATTERNS.items():
+                    if any(p in col_lower for p in patterns):
+                        meta_key = mk
+                        break
+                if meta_key:
+                    if val:  # only overwrite if non-empty
+                        rec["meta"][meta_key] = val
                 else:
-                    rec[sec][col_name] = val
+                    if val:  # skip empty cells to avoid polluting section dicts
+                        rec[sec][col_name] = val
 
     records = list(master.values())
     for rec in records:
@@ -557,7 +583,19 @@ def compute_analytics(questions, records, specialty_filter=None, credential_filt
         if m.get("years"): years_map[m["years"]] += 1
 
     # ── MCQ knowledge questions ───────────────────────────────────────────────
-    mcq_qs = [q for q in questions if q["is_mcq"] and q["section"] == "pre"]
+    DEMO_VALUES = {
+        'md/do','np','pa','rn','pharmd/dph/rph','phd','other',
+        'internal medicine','family medicine','gastroenterology','hepatology',
+        'liver transplantation','emergency medicine','general surgery',
+        'never','always','not confident','minimally confident',
+        'moderately confident','mostly confident','very confident',
+        'i do not practice medicine.',
+    }
+    # MCQ questions: must have a correct_answer that looks like a clinical answer
+    # (not a demographic/Likert value), and must appear in the POST section of data
+    mcq_qs = [q for q in questions if q["is_mcq"]
+              and q.get("correct_answer")
+              and q["correct_answer"].strip().lower() not in DEMO_VALUES]
     knowledge_results = []
     all_kg = []
 
@@ -672,8 +710,20 @@ def compute_analytics(questions, records, specialty_filter=None, credential_filt
     barriers = Counter()
     fu_behavior_change = Counter()
 
+    LIKERT_WORDS = {
+        'strongly agree','agree','neutral','neither agree nor disagree',
+        'disagree','strongly disagree','yes','no','n/a','na',
+        'very','somewhat','not at all','always','never',
+        'i do not plan to make changes','i do not manage patients',
+        '100% of the time','75% of the time','50% of the time',
+        '25% of the time','0% of the time','i do not practice medicine.',
+        'not confident','minimally confident','moderately confident',
+        'mostly confident','very confident',
+    }
     INTENT_KEYS    = ["intend", "intent", "plan to", "change your practice", "implement",
-                      "more likely", "commit", "will you", "going to change", "confident"]
+                      "more likely", "commit", "will you", "going to change", "confident",
+                      "as a result of this activity", "i intend", "change my practice",
+                      "more confident in treating"]
     RECOMMEND_KEYS = ["recommend", "colleagues", "peers", "colleague", "refer"]
     BIAS_KEYS      = ["bias", "commercial", "balanced", "independent", "free of",
                       "without bias", "unbiased", "objective"]
@@ -691,7 +741,9 @@ def compute_analytics(questions, records, specialty_filter=None, credential_filt
 
     def _is_yes(val):
         v = _norm(val)
-        return v in ("yes", "y", "true", "1", "agree", "strongly agree")
+        return v in ("yes", "y", "true", "1", "agree", "strongly agree",
+                     "always", "very confident", "mostly confident",
+                     "100% of the time", "75% of the time")
 
     for rec in filtered:
         if not rec["_has_eval"]:
@@ -716,21 +768,45 @@ def compute_analytics(questions, records, specialty_filter=None, credential_filt
                 lv = _likert_score(val)
                 if lv:
                     content_new_vals.append(lv)
-                elif vn in ("yes", "y"):
-                    content_new_vals.append(5)
-                elif vn in ("no", "n"):
-                    content_new_vals.append(1)
+                else:
+                    # Decimal percentage: 0.5 = 50%, 0.75 = 75% etc.
+                    try:
+                        fv = float(val)
+                        if 0.0 <= fv <= 1.0:
+                            content_new_vals.append(fv * 100)  # store as 0-100
+                        elif 1.0 < fv <= 100.0:
+                            content_new_vals.append(fv)
+                    except (ValueError, TypeError):
+                        if vn in ("yes", "y"):
+                            content_new_vals.append(100)
+                        elif vn in ("no", "n"):
+                            content_new_vals.append(0)
 
             if any(k in cl for k in SAT_KEYS):
                 lv = _likert_score(val)
                 if lv:
                     sat_items[col].append(lv)
 
-            if any(k in cl for k in BEHAVIOR_KEYS) and val and vn not in ("", "n/a"):
-                behavior_change[val] += 1
+            # Behavior change detection
+            # Exclude "how often" / "how confident" / "how many" columns — those are Likert/freq
+            is_freq_col     = any(k in cl for k in ["how often", "how confident", "how many",
+                                                      "how long", "percent", "percentage"])
+            is_behavior_col = any(k in cl for k in BEHAVIOR_KEYS) and not is_freq_col
+            is_likert_val   = vn in LIKERT_WORDS or len(vn) < 4
+            # Checkbox pattern: value equals column name (Nexus checkbox columns)
+            is_checkbox_match = (val.lower()[:40] == col[:40].lower() and len(val) > 10)
+            if is_behavior_col and val and not is_likert_val:
+                behavior_change[val[:120]] += 1
+            elif is_checkbox_match and len(val) > 10:
+                behavior_change[val[:120]] += 1
 
-            if any(k in cl for k in BARRIER_KEYS) and val and vn not in ("", "n/a", "none"):
-                barriers[val] += 1
+            # Barrier detection — similar logic
+            is_barrier_col = any(k in cl for k in BARRIER_KEYS)
+            is_barrier_checkbox = (val.lower()[:40] == col[:40].lower() and len(val) > 10)
+            if is_barrier_col and val and not is_likert_val and vn not in ("none",):
+                barriers[val[:120]] += 1
+            elif is_barrier_checkbox and len(val) > 10 and not is_behavior_col:
+                barriers[val[:120]] += 1
 
         # Follow-up behavior change
         if rec["_has_followup"]:
@@ -745,7 +821,14 @@ def compute_analytics(questions, records, specialty_filter=None, credential_filt
     intend_pct    = _pct(intent_yes, intent_total)
     recommend_pct = _pct(recommend_yes, recommend_total)
     bias_free_pct = _pct(bias_free_yes, bias_free_total)
-    avg_content_new = round(100 * sum(content_new_vals) / (len(content_new_vals)*5), 1) if content_new_vals else 0
+    # content_new_vals now stored as 0-100 (or 1-5 Likert scaled below)
+    avg_content_new = 0
+    if content_new_vals:
+        # Separate Likert (1-5) from pct (0-100)
+        likert_vals = [v for v in content_new_vals if v <= 5]
+        pct_vals    = [v for v in content_new_vals if v > 5]
+        combined = [v/5*100 for v in likert_vals] + pct_vals
+        avg_content_new = round(sum(combined)/len(combined), 1) if combined else 0
 
     # FU behavior change pct
     fu_total_recs = sum(1 for r in filtered if r["_has_followup"])
