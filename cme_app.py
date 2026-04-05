@@ -230,10 +230,21 @@ def _strip_prefix(text):
 
 def _likert_score(answer_str):
     """Map an answer string to 1-5 likert value; return None if unmappable."""
-    v = _norm(answer_str)
+    if answer_str is None:
+        return None
+    v = _norm(str(answer_str))
+    if not v:
+        return None
+    # Direct numeric digit: "1","2","3","4","5" or "1.0","4.0" etc.
+    try:
+        fv = float(v)
+        if 1.0 <= fv <= 5.0:
+            return int(round(fv))
+    except ValueError:
+        pass
     if v in LIKERT_MAP:
         return LIKERT_MAP[v]
-    # partial match
+    # partial match (word-in-word)
     for k, score in LIKERT_MAP.items():
         if k in v or v in k:
             return score
@@ -467,22 +478,32 @@ def parse_nexus_file(uploaded_file):
 # MATCHING ENGINE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-MATCH_THRESHOLD = 0.35
+MATCH_THRESHOLD = 0.25
 
 def _find_answer(rec_section_dict, q_text, threshold=MATCH_THRESHOLD):
     """
     Find best-matching answer in a respondent section dict.
     Returns (matched_key, answer_value) or (None, None).
+    Uses word-overlap Jaccard + exact-match and substring boost for short strings.
     """
     q_base = _strip_prefix(q_text)
+    q_norm = _norm(q_text)
     best_score = 0
     best_key = None
     best_val = None
     for col_name, val in rec_section_dict.items():
+        cn_norm = _norm(col_name)
+        cn_base = _strip_prefix(col_name)
+        # Exact match wins immediately
+        if q_norm == cn_norm or q_base == cn_base:
+            return col_name, val
         score = max(
             _text_sim(q_text, col_name),
-            _text_sim(q_base, _strip_prefix(col_name))
+            _text_sim(q_base, cn_base),
         )
+        # Substring boost: one fully contains the other
+        if q_norm in cn_norm or cn_norm in q_norm:
+            score = max(score, 0.5)
         if score > best_score:
             best_score = score
             best_key = col_name
@@ -651,14 +672,22 @@ def compute_analytics(questions, records, specialty_filter=None, credential_filt
     barriers = Counter()
     fu_behavior_change = Counter()
 
-    INTENT_KEYS    = ["intend", "intent", "plan to", "change your practice", "implement"]
-    RECOMMEND_KEYS = ["recommend", "colleagues", "peers"]
-    BIAS_KEYS      = ["bias", "commercial", "balanced", "independent"]
-    CONTENT_NEW_KEYS = ["new", "novel", "content", "information you did not"]
+    INTENT_KEYS    = ["intend", "intent", "plan to", "change your practice", "implement",
+                      "more likely", "commit", "will you", "going to change", "confident"]
+    RECOMMEND_KEYS = ["recommend", "colleagues", "peers", "colleague", "refer"]
+    BIAS_KEYS      = ["bias", "commercial", "balanced", "independent", "free of",
+                      "without bias", "unbiased", "objective"]
+    CONTENT_NEW_KEYS = ["new", "novel", "content", "information you did not", "previously unaware",
+                        "did not know", "was new", "were new", "learn new"]
     SAT_KEYS       = ["overall", "satisfaction", "quality", "objectives", "relevance",
-                      "format", "faculty", "speaker", "presenter", "material", "useful"]
-    BEHAVIOR_KEYS  = ["change", "behavior", "practice", "implement", "applied", "adopted"]
-    BARRIER_KEYS   = ["barrier", "prevent", "challenge", "difficult", "hinder", "obstacle"]
+                      "format", "faculty", "speaker", "presenter", "material", "useful",
+                      "met my", "rating", "rate the", "how would you rate"]
+    BEHAVIOR_KEYS  = ["change", "behavior", "behaviour", "practice", "implement", "applied",
+                      "adopted", "action", "will you", "plan to", "intend to", "following the",
+                      "as a result", "based on", "after this"]
+    BARRIER_KEYS   = ["barrier", "prevent", "challenge", "difficult", "hinder", "obstacle",
+                      "concern", "issue", "problem", "limit", "restrict", "unable", "lack",
+                      "access", "cost", "time", "resource", "knowledge gap", "uncertainty"]
 
     def _is_yes(val):
         v = _norm(val)
@@ -1123,58 +1152,187 @@ Format professionally in plain text with clear section headers.
 # MAIN APP
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN APP — Full UI rewrite matching design screenshots
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import math
+
+def _donut_svg(pct, color, size=80, stroke=8):
+    """Render a circular donut ring SVG with percentage inside."""
+    r = (size - stroke) / 2
+    circ = 2 * math.pi * r
+    dash = (pct / 100) * circ
+    gap  = circ - dash
+    cx = cy = size / 2
+    font = size * 0.22
+    return f"""<svg width="{size}" height="{size}" viewBox="0 0 {size} {size}">
+  <circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="#1e293b" stroke-width="{stroke}"/>
+  <circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{color}" stroke-width="{stroke}"
+    stroke-dasharray="{dash:.1f} {gap:.1f}" stroke-linecap="round"
+    transform="rotate(-90 {cx} {cy})"/>
+  <text x="{cx}" y="{cy}" text-anchor="middle" dominant-baseline="central"
+    fill="{color}" font-size="{font:.1f}" font-weight="700" font-family="Inter,sans-serif">{pct}%</text>
+</svg>"""
+
+
+def _bar_html(pct, color, height=10):
+    return f"""<div style="background:#1e293b;border-radius:3px;height:{height}px;overflow:hidden;">
+  <div style="background:{color};height:{height}px;width:{min(pct,100):.1f}%;border-radius:3px;"></div>
+</div>"""
+
+
+def _badge(text, bg, fg):
+    return f'<span style="background:{bg};color:{fg};border-radius:20px;padding:2px 9px;font-size:0.72rem;font-weight:700;">{text}</span>'
+
+
+def _section_label(text):
+    return f'<div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:.1em;color:#475569;font-weight:700;margin-bottom:10px;">{text}</div>'
+
+
+def render_knowledge_row(q, full_width=False):
+    """Render one knowledge question row — pre/post bars + gain badge + popup."""
+    pre  = q["prePct"]; post = q["postPct"]; gain = q["gain"]
+    gain_col = "#22c55e" if gain >= 0 else "#ef4444"
+    sign = "+" if gain >= 0 else ""
+    pval_txt = ""
+    if q.get("pval") is not None and q["pval"] < 0.05:
+        p = q["pval"]
+        pval_txt = "p<0.001" if p < 0.001 else f"p={p:.3f}"
+    label_trunc = q["label"][:90] + ("…" if len(q["label"]) > 90 else "")
+    correct = q.get("correctAnswer","")
+
+    st.markdown(f"""
+<div style="padding:10px 0 6px;border-bottom:1px solid #0f1e3a;">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;">
+    <div style="font-size:0.83rem;color:#cbd5e1;flex:1;padding-right:16px;line-height:1.4;">{label_trunc}</div>
+    <div style="display:flex;align-items:center;gap:6px;white-space:nowrap;">
+      {_badge(f"{sign}{gain}pp", "#14532d", "#4ade80")}
+      {'<span style="color:#475569;font-size:0.68rem;">'+pval_txt+'</span>' if pval_txt else ''}
+    </div>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+    <span style="font-size:0.65rem;color:#475569;width:26px;font-weight:600;">PRE</span>
+    <div style="flex:1;">{_bar_html(pre,'#ef4444',10)}</div>
+    <span style="font-size:0.75rem;font-weight:700;color:#f87171;width:34px;text-align:right;">{pre}%</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px;">
+    <span style="font-size:0.65rem;color:#475569;width:26px;font-weight:600;">POST</span>
+    <div style="flex:1;">{_bar_html(post,'#22c55e',10)}</div>
+    <span style="font-size:0.75rem;font-weight:700;color:#4ade80;width:34px;text-align:right;">{post}%</span>
+  </div>
+  {f'<div style="font-size:0.68rem;color:#475569;margin-top:4px;">✓ <span style="color:#64748b;">{correct}</span></div>' if correct else ''}
+</div>
+""", unsafe_allow_html=True)
+
+    # Clickable popup
+    calc = q.get("_calc", {})
+    pre_c  = calc.get("preCorrect",  "—")
+    pre_t  = calc.get("preTotal",    "—")
+    post_c = calc.get("postCorrect", "—")
+    post_t = calc.get("postTotal",   "—")
+
+    with st.expander(f"🔍 PRE  |  POST  — click for detail", expanded=False):
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown("**PRE**")
+            st.markdown("Percentage of pre-test respondents who selected the correct answer before the educational activity.")
+        with col_b:
+            st.markdown("**POST**")
+            st.markdown("Percentage of post-test respondents who selected the correct answer after the educational activity.")
+        st.markdown("**FORMULA**")
+        st.code("Correct answers / Total responses × 100 for each time point\nKnowledge gain = Post% − Pre% (percentage points)", language="text")
+        st.markdown("**ACTUAL CALCULATION**")
+        st.code(f"Pre:  {pre_c}/{pre_t} = {pre}%\nPost: {post_c}/{post_t} = {post}% (Δ{sign}{gain}pp)\n\nCorrect answer: {correct or 'N/A'}", language="text")
+        st.markdown("**DATA SOURCE BREAKDOWN**")
+        st.markdown(f"""
+| Source | N Pre | Pre % | N Post | Post % | Δ |
+|--------|-------|-------|--------|--------|---|
+| Combined | {pre_t} | {pre}% | {post_t} | {post}% | {sign}{gain}pp |
+""")
+        st.markdown('<div style="background:#0d2a1a;border:1px solid #166534;border-radius:6px;padding:8px 12px;font-size:0.75rem;color:#4ade80;">✓ All vendor data included in combined calculation</div>', unsafe_allow_html=True)
+        col_x, col_y = st.columns([1,1])
+        col_x.button("Copy to Clipboard", key=f"cp_{label_trunc[:20]}", disabled=True)
+
+
+def render_horiz_bar(label, pct, color="#f59e0b", n=None, show_n_inline=True):
+    n_html = f' <a href="#" style="color:#475569;font-size:0.68rem;text-decoration:none;">(n={n})</a>' if n else ""
+    label_short = label[:80] + ("…" if len(label) > 80 else "")
+    st.markdown(f"""
+<div style="margin-bottom:8px;">
+  <div style="display:flex;justify-content:space-between;margin-bottom:3px;">
+    <span style="font-size:0.78rem;color:#cbd5e1;">{label_short}{n_html}</span>
+    <span style="font-size:0.78rem;font-weight:700;color:{color};">{pct}%</span>
+  </div>
+  {_bar_html(pct, color, 8)}
+</div>
+""", unsafe_allow_html=True)
+
+
+def render_eval_donut(col, pct, label, sublabel, color):
+    col.markdown(f"""
+<div style="text-align:center;padding:20px 10px 10px;">
+  {_donut_svg(pct, color, size=100, stroke=10)}
+  <div style="font-size:0.78rem;font-weight:600;color:#e2e8f0;margin-top:8px;line-height:1.3;">{label}</div>
+  <div style="font-size:0.68rem;color:#475569;margin-top:2px;">{sublabel}</div>
+</div>
+""", unsafe_allow_html=True)
+
+
 def main():
     # ── Session state ─────────────────────────────────────────────────────────
-    if "questions"  not in st.session_state: st.session_state.questions  = None
-    if "records"    not in st.session_state: st.session_state.records    = None
-    if "analytics"  not in st.session_state: st.session_state.analytics  = None
-    if "ai_insights" not in st.session_state: st.session_state.ai_insights = None
-    if "jcehp_text" not in st.session_state: st.session_state.jcehp_text = None
-    if "key_name"   not in st.session_state: st.session_state.key_name   = ""
-    if "exch_name"  not in st.session_state: st.session_state.exch_name  = ""
-    if "nexus_name" not in st.session_state: st.session_state.nexus_name = ""
-    if "spec_filter"  not in st.session_state: st.session_state.spec_filter  = "All"
-    if "cred_filter"  not in st.session_state: st.session_state.cred_filter  = "All"
-    if "vendor_filter" not in st.session_state: st.session_state.vendor_filter = "All"
+    for k, v in {
+        "questions": None, "records": None, "analytics": None,
+        "ai_insights": None, "jcehp_text": None,
+        "key_name": "", "exch_name": "", "nexus_name": "",
+        "spec_filter": "All", "cred_filter": "All", "vendor_filter": "All",
+    }.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
-    # ── Header ────────────────────────────────────────────────────────────────
-    c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 1, 1])
-    with c1:
-        st.markdown("""
-        <div style="display:flex;align-items:center;gap:6px;padding-top:6px;">
-          <span style="font-size:1.4rem;font-weight:800;">
-            <span style="color:#3b82f6;">Integritas</span>
-            <span style="color:#e2e8f0;"> CME Outcomes Harmonizer</span>
-          </span>
-        </div>
-        """, unsafe_allow_html=True)
-    with c2:
-        program_name = st.text_input("Program Name", placeholder="e.g. WAYPOINT 2025", label_visibility="collapsed")
-    with c3:
-        project_code = st.text_input("Project Code", placeholder="e.g. 1292-INT", label_visibility="collapsed")
+    an = st.session_state["analytics"]
 
-    an = st.session_state.analytics
-    with c4:
-        nexus_n = an["vendors"].get("Nexus", 0) if an else 0
-        exch_n  = an["vendors"].get("Exchange", 0) if an else 0
-        st.markdown(f"""
-        <div style="display:flex;gap:6px;padding-top:8px;">
-          <span class="badge-purple">Nexus {nexus_n}</span>
-          <span class="badge-blue">Exch {exch_n}</span>
-        </div>
-        """, unsafe_allow_html=True)
+    # ════════════════════════════════════════════════════════════════════════
+    # TOP HEADER BAR
+    # ════════════════════════════════════════════════════════════════════════
+    nexus_n = an["vendors"].get("Nexus", 0) if an else 0
+    exch_n  = an["vendors"].get("Exchange", 0) if an else 0
+    prog_name = st.session_state.get("_prog_name", "")
+    proj_code = st.session_state.get("_proj_code", "")
 
-    st.markdown("---")
+    st.markdown(f"""
+<div style="background:#060c1a;border-bottom:1px solid #1e293b;padding:8px 20px;
+            display:flex;align-items:center;justify-content:space-between;
+            margin:-1rem -1rem 0;position:sticky;top:0;z-index:999;">
+  <div style="display:flex;align-items:center;gap:20px;">
+    <div>
+      <span style="font-size:1.15rem;font-weight:800;color:#3b82f6;">Integritas</span>
+      <span style="font-size:1.15rem;font-weight:800;color:#e2e8f0;"> CME Outcomes Harmonizer</span>
+      <div style="font-size:0.65rem;color:#475569;margin-top:-2px;">
+        {'Nexus · ExchangeCME · Any Vendor' if an else 'Upload files to begin'}
+      </div>
+    </div>
+  </div>
+  <div style="display:flex;align-items:center;gap:10px;">
+    <span style="color:#64748b;font-size:0.75rem;cursor:pointer;">📁 Past Reports</span>
+    <span style="color:#64748b;font-size:0.75rem;cursor:pointer;">+ New Report</span>
+    {'<span style="background:#1e3a5f;color:#60a5fa;border-radius:20px;padding:3px 10px;font-size:0.72rem;font-weight:700;">Nexus ('+str(nexus_n)+')</span>' if nexus_n else ''}
+    {'<span style="background:#14532d;color:#4ade80;border-radius:20px;padding:3px 10px;font-size:0.72rem;font-weight:700;">Exchange ('+str(exch_n)+')</span>' if exch_n else ''}
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
-    # ── File uploaders always live in sidebar (accessible after load too) ─────
+    # ── Sidebar (re-upload after initial load) ────────────────────────────────
     with st.sidebar:
-        st.markdown("### 📁 Re-Upload Files")
+        st.markdown("### 📁 Upload Files")
         sb_key  = st.file_uploader("Question Key (.xlsx)",  type=["xlsx"], key="sb_key_up")
         sb_exch = st.file_uploader("Exchange Data (.xlsx)", type=["xlsx"], key="sb_exch_up")
         sb_nex  = st.file_uploader("Nexus Data (.xlsx)",    type=["xlsx"], key="sb_nex_up")
-        if st.button("⚡ Re-Run Analysis", type="primary", use_container_width=True):
-            _files = (sb_key, sb_exch, sb_nex)
-            if not all(_files):
+        _pn = st.text_input("Program Name", value=prog_name, key="sb_prog")
+        _pc = st.text_input("Project Code", value=proj_code, key="sb_proj")
+        if st.button("⚡ Run Analysis", type="primary", use_container_width=True):
+            if not all([sb_key, sb_exch, sb_nex]):
                 st.error("Upload all 3 files first.")
             else:
                 with st.spinner("Parsing…"):
@@ -1182,680 +1340,987 @@ def main():
                         qs = parse_key_file(sb_key)
                         er = parse_exchange_file(sb_exch)
                         nr = parse_nexus_file(sb_nex)
-                        st.session_state.questions   = qs
-                        st.session_state.records     = er + nr
-                        st.session_state.key_name    = sb_key.name
-                        st.session_state.exch_name   = sb_exch.name
-                        st.session_state.nexus_name  = sb_nex.name
-                        st.session_state.analytics   = compute_analytics(qs, er + nr)
-                        st.session_state.ai_insights = None
-                        st.session_state.jcehp_text  = None
-                        st.success(f"✓ {len(qs)} questions | {len(er+nr)} learners")
+                        all_recs = er + nr
+                        st.session_state["questions"]   = qs
+                        st.session_state["records"]     = all_recs
+                        st.session_state["key_name"]    = sb_key.name
+                        st.session_state["exch_name"]   = sb_exch.name
+                        st.session_state["nexus_name"]  = sb_nex.name
+                        st.session_state["_prog_name"] = _pn
+                        st.session_state["_proj_code"] = _pc
+                        st.session_state["analytics"]   = compute_analytics(qs, all_recs)
+                        st.session_state["ai_insights"] = None
+                        st.session_state["jcehp_text"]  = None
+                        st.success(f"✓ {len(qs)} questions | {len(all_recs):,} learners")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Parse error: {e}")
                         import traceback; st.code(traceback.format_exc())
-        if an:
-            st.markdown("---")
-            st.metric("Total Learners", an["total"])
-            st.metric("Avg Knowledge Gain", f"{an['avgKnowledgeGain']}pp")
-            st.metric("Intent to Change", f"{an['intendChangePct']}%")
 
-    # ── No data → show full-page upload panel ─────────────────────────────────
+    # ════════════════════════════════════════════════════════════════════════
+    # HOME SCREEN — no data yet
+    # ════════════════════════════════════════════════════════════════════════
     if not an:
+        st.markdown("<div style='height:24px;'></div>", unsafe_allow_html=True)
         st.markdown("""
-        <div style="text-align:center;padding:32px 0 16px;">
-          <div style="font-size:3rem;margin-bottom:10px;">📊</div>
-          <div style="font-size:1.5rem;font-weight:800;color:#e2e8f0;margin-bottom:6px;">
-            <span style="color:#3b82f6;">Integritas</span> CME Outcomes Harmonizer
-          </div>
-          <div style="color:#64748b;font-size:0.88rem;">
-            Upload your 3 source files below to generate the full outcomes dashboard.
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+<div style="text-align:center;padding:24px 0 16px;">
+  <div style="font-size:2.8rem;margin-bottom:10px;">📊</div>
+  <div style="font-size:1.6rem;font-weight:800;color:#e2e8f0;margin-bottom:6px;">
+    <span style="color:#3b82f6;">Integritas</span> CME Outcomes Harmonizer
+  </div>
+  <div style="color:#475569;font-size:0.88rem;max-width:520px;margin:0 auto;">
+    Upload your 3 source files to generate the full outcomes dashboard.
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
-        # Upload panel — 3 columns, prominently in the main body
-        up_left, up_mid, up_right = st.columns(3)
+        uc1, uc2, uc3 = st.columns(3)
+        for col, icon, title, desc, color, fkey, flabel in [
+            (uc1, "📋", "FILE 1 — QUESTION KEY",   "Exchange survey definition (.xlsx)\nRowid · Questionnaire · Type · Score · Answers", "#3b82f6", "key_up",  "Question Key"),
+            (uc2, "📗", "FILE 2 — EXCHANGE DATA",  "Exchange respondent file (.xlsx)\n3-row header · PRE / POST / EVALUATION banners",  "#22c55e", "exch_up", "Exchange Data"),
+            (uc3, "📘", "FILE 3 — NEXUS DATA",     "Nexus multi-sheet file (.xlsx)\nSheets: Pre-Test · Post · Eval · Follow Up",        "#a855f7", "nexus_up","Nexus Data"),
+        ]:
+            col.markdown(f"""
+<div style="background:#0f1e3a;border:1px solid {color}44;border-radius:10px;padding:14px 14px 6px;margin-bottom:4px;">
+  <div style="font-size:1.5rem;margin-bottom:4px;">{icon}</div>
+  <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:.08em;color:{color};font-weight:700;margin-bottom:6px;">{title}</div>
+  <div style="color:#64748b;font-size:0.72rem;line-height:1.5;white-space:pre-line;">{desc}</div>
+</div>
+""", unsafe_allow_html=True)
+            col.file_uploader(flabel, type=["xlsx"], key=fkey, label_visibility="collapsed")
 
-        with up_left:
-            st.markdown("""
-            <div style="background:#0f1e3a;border:1px solid #1e3a5f;border-radius:10px;
-                        padding:16px 16px 8px;margin-bottom:4px;">
-              <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:.08em;
-                          color:#3b82f6;font-weight:700;margin-bottom:6px;">
-                📋 FILE 1 — QUESTION KEY
-              </div>
-              <div style="color:#94a3b8;font-size:0.75rem;margin-bottom:10px;">
-                Exchange survey definition (.xlsx)<br/>
-                Contains question text, correct answers, and scoring flags.
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
-            key_file = st.file_uploader("Question Key", type=["xlsx"], key="key_up", label_visibility="collapsed")
+        st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
+        # status row
+        s1, s2, s3 = st.columns(3)
+        key_f  = st.session_state.get("key_up")
+        exch_f = st.session_state.get("exch_up")
+        nex_f  = st.session_state.get("nexus_up")
+        for col, f, label in [(s1,key_f,"Question Key"),(s2,exch_f,"Exchange Data"),(s3,nex_f,"Nexus Data")]:
+            col.markdown(f"<div style='text-align:center;font-size:0.8rem;color:{'#22c55e' if f else '#475569'};'>{'✅' if f else '⬜'} {label}</div>", unsafe_allow_html=True)
 
-        with up_mid:
-            st.markdown("""
-            <div style="background:#0f1e3a;border:1px solid #1e3a5f;border-radius:10px;
-                        padding:16px 16px 8px;margin-bottom:4px;">
-              <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:.08em;
-                          color:#22c55e;font-weight:700;margin-bottom:6px;">
-                📗 FILE 2 — EXCHANGE DATA
-              </div>
-              <div style="color:#94a3b8;font-size:0.75rem;margin-bottom:10px;">
-                Exchange respondent file (.xlsx)<br/>
-                3-row header with PRE / POST / EVALUATION banners.
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
-            exch_file = st.file_uploader("Exchange Data", type=["xlsx"], key="exch_up", label_visibility="collapsed")
+        st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
 
-        with up_right:
-            st.markdown("""
-            <div style="background:#0f1e3a;border:1px solid #1e3a5f;border-radius:10px;
-                        padding:16px 16px 8px;margin-bottom:4px;">
-              <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:.08em;
-                          color:#a855f7;font-weight:700;margin-bottom:6px;">
-                📘 FILE 3 — NEXUS DATA
-              </div>
-              <div style="color:#94a3b8;font-size:0.75rem;margin-bottom:10px;">
-                Nexus multi-sheet respondent file (.xlsx)<br/>
-                Sheets: Pre-Test · Post · Eval · Follow Up
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
-            nexus_file = st.file_uploader("Nexus Data", type=["xlsx"], key="nexus_up", label_visibility="collapsed")
+        # Program info row
+        pi1, pi2, _ = st.columns([2, 2, 2])
+        with pi1:
+            _pn2 = st.text_input("Program Name", placeholder="e.g. MASH Obstacles 2025", key="hs_prog")
+        with pi2:
+            _pc2 = st.text_input("Project Code", placeholder="e.g. INT-2025-00", key="hs_proj")
 
-        # Status indicators
-        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
-        si1, si2, si3 = st.columns(3)
-        for col, f, label in [(si1, key_file, "Question Key"), (si2, exch_file, "Exchange Data"), (si3, nexus_file, "Nexus Data")]:
-            col.markdown(
-                f"<div style='text-align:center;font-size:0.8rem;color:{'#22c55e' if f else '#475569'};'>"
-                f"{'✅' if f else '⬜'} {label}{'  ✓' if f else ''}</div>",
-                unsafe_allow_html=True
-            )
-
-        st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
-
-        # Run button — centered
-        _, btn_col, _ = st.columns([2, 2, 2])
+        _, btn_col, _ = st.columns([1.5, 2, 1.5])
         with btn_col:
-            run_clicked = st.button("⚡  Run Analysis", type="primary", use_container_width=True)
+            run = st.button("⚡  Run Analysis", type="primary", use_container_width=True)
 
-        if run_clicked:
-            if not key_file or not exch_file or not nexus_file:
-                missing = [n for n, f in [("Question Key", key_file), ("Exchange Data", exch_file), ("Nexus Data", nexus_file)] if not f]
+        if run:
+            key_f  = st.session_state.get("key_up")
+            exch_f = st.session_state.get("exch_up")
+            nex_f  = st.session_state.get("nexus_up")
+            missing = [n for n, f in [("Question Key", key_f), ("Exchange Data", exch_f), ("Nexus Data", nex_f)] if not f]
+            if missing:
                 st.error(f"Still missing: {', '.join(missing)}")
             else:
                 with st.spinner("Parsing files and computing analytics…"):
                     try:
-                        qs = parse_key_file(key_file)
-                        er = parse_exchange_file(exch_file)
-                        nr = parse_nexus_file(nexus_file)
-                        st.session_state.questions   = qs
-                        st.session_state.records     = er + nr
-                        st.session_state.key_name    = key_file.name
-                        st.session_state.exch_name   = exch_file.name
-                        st.session_state.nexus_name  = nexus_file.name
-                        st.session_state.analytics   = compute_analytics(qs, er + nr)
-                        st.session_state.ai_insights = None
-                        st.session_state.jcehp_text  = None
-                        st.success(f"✓ Parsed {len(qs)} questions and {len(er+nr):,} learner records. Loading dashboard…")
+                        qs = parse_key_file(key_f)
+                        er = parse_exchange_file(exch_f)
+                        nr = parse_nexus_file(nex_f)
+                        all_recs = er + nr
+                        st.session_state["questions"]   = qs
+                        st.session_state["records"]     = all_recs
+                        st.session_state["key_name"]    = key_f.name
+                        st.session_state["exch_name"]   = exch_f.name
+                        st.session_state["nexus_name"]  = nex_f.name
+                        st.session_state["_prog_name"] = _pn2
+                        st.session_state["_proj_code"] = _pc2
+                        st.session_state["analytics"]   = compute_analytics(qs, all_recs)
+                        st.session_state["ai_insights"] = None
+                        st.session_state["jcehp_text"]  = None
+                        st.success(f"✓ {len(qs)} questions · {len(all_recs):,} learners — loading dashboard…")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Parse error: {e}")
                         import traceback; st.code(traceback.format_exc())
         return
 
-    # ── Filter bar ────────────────────────────────────────────────────────────
-    specs   = ["All"] + sorted(an["specialties"].keys())
-    creds   = ["All"] + sorted(an["credentials"].keys())
-    vendors = ["All", "Exchange", "Nexus"]
+    # ════════════════════════════════════════════════════════════════════════
+    # DASHBOARD — data loaded
+    # ════════════════════════════════════════════════════════════════════════
 
-    def _filter_pills(options, key, label):
-        st.markdown(f"<span style='font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:.06em;'>{label}</span>", unsafe_allow_html=True)
-        cols = st.columns(min(len(options), 10))
-        current = st.session_state.get(key, "All")
-        for i, opt in enumerate(options[:10]):
-            cnt = an["specialties"].get(opt, an["credentials"].get(opt, "")) if opt != "All" else ""
-            lbl = f"{opt} ({cnt})" if cnt else opt
-            if cols[i % 10].button(lbl, key=f"{key}_{opt}", use_container_width=True):
-                st.session_state[key] = opt
-                # Recompute analytics with filter
-                _recompute()
+    # ── Program name + project code display ───────────────────────────────
+    prog_name = st.session_state.get("_prog_name","")
+    proj_code = st.session_state.get("_proj_code","")
+    pn_display = prog_name or st.session_state.get("exch_name","Program")[:40]
+    pc_display = proj_code or ""
+
+    st.markdown(f"""
+<div style="display:flex;align-items:center;gap:12px;padding:8px 0 6px;">
+  <div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:6px;
+              padding:5px 14px;font-size:0.82rem;color:#94a3b8;min-width:200px;">{pn_display}</div>
+  <div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:6px;
+              padding:5px 14px;font-size:0.82rem;color:#94a3b8;min-width:160px;">{pc_display or 'Project code (e.g. INT-2025-00)'}</div>
+  <div style="flex:1;"></div>
+  <button style="background:#a855f7;color:#fff;border:none;border-radius:6px;
+                 padding:6px 16px;font-size:0.78rem;font-weight:600;cursor:pointer;">🔮 Deep Insights</button>
+  <button style="background:#3b82f6;color:#fff;border:none;border-radius:6px;
+                 padding:6px 16px;font-size:0.78rem;font-weight:600;cursor:pointer;">✍️ Write Article</button>
+  <button style="background:#22c55e;color:#fff;border:none;border-radius:6px;
+                 padding:6px 16px;font-size:0.78rem;font-weight:600;cursor:pointer;">📄 PDF Report</button>
+</div>
+""", unsafe_allow_html=True)
+
+    # ── FILTER BAR (inline pill buttons) ─────────────────────────────────
+    specs   = sorted(an["specialties"].keys())
+    creds   = sorted(an["credentials"].keys())
+
+    def _pill(label, count, key, active_val, filter_key):
+        is_active = (st.session_state[filter_key] == active_val)
+        bg = "#1e3a5f" if is_active else "#0f1e3a"
+        fg = "#60a5fa" if is_active else "#94a3b8"
+        border = "#3b82f6" if is_active else "#1e293b"
+        cnt_str = f" ({count})" if count else ""
+        if st.button(f"{label}{cnt_str}", key=key,
+                     help=label,
+                     use_container_width=False):
+            st.session_state[filter_key] = active_val
+            _recompute()
 
     def _recompute():
-        sf = st.session_state.spec_filter
-        cf = st.session_state.cred_filter
-        vf = st.session_state.vendor_filter
-        st.session_state.analytics = compute_analytics(
-            st.session_state.questions,
-            st.session_state.records,
-            specialty_filter=[sf] if sf != "All" else None,
-            credential_filter=[cf] if cf != "All" else None,
+        sf = st.session_state.get("spec_filter","All")
+        cf = st.session_state.get("cred_filter","All")
+        vf = st.session_state.get("vendor_filter","All")
+        st.session_state["analytics"] = compute_analytics(
+            st.session_state["questions"],
+            st.session_state["records"],
+            specialty_filter=[sf] if sf!="All" else None,
+            credential_filter=[cf] if cf!="All" else None,
             vendor_filter=vf,
         )
-        an = st.session_state.analytics  # refresh local ref
 
-    with st.container():
-        st.markdown("<div class='card' style='padding:10px 16px;'>", unsafe_allow_html=True)
-        st.markdown("**FILTER DATA**")
-        fcol1, fcol2, fcol3 = st.columns([4, 3, 2])
-        with fcol1:
-            new_spec = st.selectbox("SPECIALTY", specs, index=0, key="spec_sel", label_visibility="visible")
-            if new_spec != st.session_state.spec_filter:
-                st.session_state.spec_filter = new_spec; _recompute()
-        with fcol2:
-            new_cred = st.selectbox("PROFESSION", creds, index=0, key="cred_sel", label_visibility="visible")
-            if new_cred != st.session_state.cred_filter:
-                st.session_state.cred_filter = new_cred; _recompute()
-        with fcol3:
-            new_vend = st.selectbox("VENDOR", vendors, index=0, key="vend_sel", label_visibility="visible")
-            if new_vend != st.session_state.vendor_filter:
-                st.session_state.vendor_filter = new_vend; _recompute()
-        st.markdown("</div>", unsafe_allow_html=True)
+    # Build inline pill rows with st.columns
+    total_n = an["total"]
+    st.markdown(f"""
+<div style="background:#060c1a;border:1px solid #0f1e3a;border-radius:8px;padding:8px 14px;margin-bottom:4px;">
+  <div style="font-size:0.62rem;text-transform:uppercase;letter-spacing:.1em;color:#334155;font-weight:700;margin-bottom:6px;">FILTER DATA &nbsp;&nbsp; SPECIALTY:</div>
+""", unsafe_allow_html=True)
 
-    # Refresh analytics ref after possible filter
-    an = st.session_state.analytics
+    # Specialty pills
+    spec_options = [("All", total_n)] + [(s, an["specialties"][s]) for s in specs]
+    ncols = min(len(spec_options), 12)
+    spec_cols = st.columns(ncols + 1)
+    for i, (sname, sn) in enumerate(spec_options[:ncols]):
+        is_active = st.session_state["spec_filter"] == sname
+        lbl = f"{'✦ ' if is_active else ''}{sname} ({sn})"
+        if spec_cols[i].button(lbl, key=f"sp_{sname}", use_container_width=True):
+            st.session_state["spec_filter"] = sname
+            _recompute(); st.rerun()
 
-    # ── Action buttons ────────────────────────────────────────────────────────
-    act1, act2, act3, act4 = st.columns(4)
+    # Profession pills
+    st.markdown('<div style="font-size:0.62rem;text-transform:uppercase;letter-spacing:.1em;color:#334155;font-weight:700;margin:6px 0 4px;">PROFESSION:</div>', unsafe_allow_html=True)
+    cred_options = [("All", total_n)] + [(c, an["credentials"][c]) for c in creds]
+    ncred = min(len(cred_options), 12)
+    cred_cols = st.columns(ncred + 1)
+    for i, (cname, cn) in enumerate(cred_options[:ncred]):
+        is_active = st.session_state["cred_filter"] == cname
+        lbl = f"{'✦ ' if is_active else ''}{cname} ({cn})"
+        if cred_cols[i].button(lbl, key=f"cr_{cname}", use_container_width=True):
+            st.session_state["cred_filter"] = cname
+            _recompute(); st.rerun()
+
+    # Vendor pills
+    st.markdown('<div style="font-size:0.62rem;text-transform:uppercase;letter-spacing:.1em;color:#334155;font-weight:700;margin:6px 0 4px;">VENDOR:</div>', unsafe_allow_html=True)
+    vend_options = [("All", total_n), ("Nexus", an["vendors"].get("Nexus",0)), ("Exchange", an["vendors"].get("Exchange",0))]
+    v_cols = st.columns(4)
+    for i, (vname, vn) in enumerate(vend_options):
+        is_active = st.session_state["vendor_filter"] == vname
+        lbl = f"{'✦ ' if is_active else ''}{vname} ({vn})"
+        if v_cols[i].button(lbl, key=f"vn_{vname}", use_container_width=True):
+            st.session_state["vendor_filter"] = vname
+            _recompute(); st.rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # Action buttons (real Streamlit ones)
+    act1, act2, act3, act4 = st.columns([1,1,1,3])
     with act1:
         if st.button("🔮 Deep Insights", type="secondary", use_container_width=True):
             with st.spinner("Generating AI insights…"):
-                st.session_state.ai_insights = generate_ai_insights(an, program_name or "CME Program")
+                st.session_state["ai_insights"] = generate_ai_insights(an, pn_display)
     with act2:
-        if st.button("📝 Write Article", use_container_width=True):
+        if st.button("✍️ Write Article", use_container_width=True):
             with st.spinner("Drafting JCEHP article…"):
-                st.session_state.jcehp_text = generate_jcehp_article(an, program_name or "CME Program", st.session_state.questions)
+                st.session_state["jcehp_text"] = generate_jcehp_article(an, pn_display, st.session_state["questions"])
     with act3:
-        # PDF export placeholder
-        if st.button("📄 PDF Report", use_container_width=True):
-            st.info("PDF export: run locally with pdfkit or weasyprint. Download raw analytics JSON below.")
-    with act4:
         json_export = json.dumps(an, indent=2, default=str)
-        st.download_button("⬇ Export JSON", json_export, file_name="analytics.json", mime="application/json", use_container_width=True)
+        st.download_button("⬇ Export JSON", json_export, "analytics.json", "application/json", use_container_width=True)
 
-    st.markdown("---")
+    # Refresh an after potential recompute
+    an = st.session_state["analytics"]
 
-    # ── TABS ──────────────────────────────────────────────────────────────────
-    kg_badge = f"Knowledge ({an['knowledgeCount']})" if an['knowledgeCount'] else "Knowledge"
-    ai_badge = f"AI Insights ({an['aiInsightsCount']})"
-    jcehp_badge = f"JCEHP Article ({an['jcehpCount']})"
+    # ════════════════════════════════════════════════════════════════════════
+    # TABS
+    # ════════════════════════════════════════════════════════════════════════
+    kg_badge  = f"Knowledge {an['knowledgeCount']}" if an['knowledgeCount'] else "Knowledge"
+    ai_badge  = "AI Insights 7"
+    je_badge  = "JCEHP Article 1"
 
     tabs = st.tabs([
-        "Overview",
-        kg_badge,
-        "Competence",
-        "Evaluation",
-        ai_badge,
-        jcehp_badge,
-        "CIRCLE Framework",
-        "Kirkpatrick",
-        "Key Findings",
-        "Advanced Metrics",
+        "Overview", kg_badge, "Competence", "Evaluation",
+        ai_badge, je_badge, "CIRCLE Framework",
+        "Kirkpatrick", "Key Findings", "Advanced Metrics",
     ])
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     # TAB 0 — OVERVIEW
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     with tabs[0]:
-        # Stat cards
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
-        stat_card(c1, f"{an['total']:,}", "Total Learners", "#3b82f6")
-        stat_card(c2, f"{an['preOnly']:,}", "Pre Only", "#94a3b8")
-        stat_card(c3, f"{an['withPost']:,}", "Pre + Post", "#22c55e")
-        stat_card(c4, f"{an['withEval']:,}", "With Eval", "#a855f7")
-        stat_card(c5, f"{an['withFU']:,}", "Follow-Up", "#f59e0b")
-        stat_card(c6, f"{an['avgContentNew']}%", "Avg % New Content", "#06b6d4")
+        # 6 stat cards
+        c1,c2,c3,c4,c5,c6 = st.columns(6)
+        def _stat(col, val, title, sub, color):
+            col.markdown(f"""
+<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:10px;padding:18px 14px 14px;text-align:left;">
+  <div style="font-size:2rem;font-weight:800;color:{color};">{val}</div>
+  <div style="font-size:0.75rem;font-weight:600;color:#e2e8f0;margin-top:2px;text-decoration:underline dotted #334155;">{title}</div>
+  <div style="font-size:0.65rem;color:#475569;margin-top:2px;">{sub}</div>
+</div>
+""", unsafe_allow_html=True)
 
-        st.markdown("---")
+        _stat(c1, f"{an['total']:,}",    "Total Pre-Test Learners",  f"n={an['total']:,}",                "#3b82f6")
+        _stat(c2, f"{an['preOnly']:,}",  "Pre-Only Learners",        f"n={an['preOnly']:,}",              "#3b82f6")
+        _stat(c3, f"{an['withPost']:,}", "Pre/Post Matched",         f"{an['preToPostRate']}% of pre-test starters", "#a855f7")
+        _stat(c4, f"{an['withEval']:,}", "With Evaluation",          "Moore Levels 2–4",                 "#f59e0b")
+        _stat(c5, f"{an['withFU']:,}",   "Follow-Up",                "Moore Level 5",                    "#22c55e")
+        _stat(c6, f"{an['avgContentNew']}%", "Avg % New Content",    f"n={an['withEval']:,}",            "#06b6d4")
 
-        left, right = st.columns(2)
-        with left:
-            st.markdown("#### 📚 Knowledge Gains")
-            for kr in an["knowledgeResults"][:6]:
-                bar_row(
-                    label=kr["label"],
-                    pre_pct=kr["prePct"], post_pct=kr["postPct"],
-                    gain=kr["gain"], key=f"ov_{kr['label'][:20]}",
-                    correct=kr["correctAnswer"],
-                    pre_correct=kr["_calc"]["preCorrect"], pre_total=kr["_calc"]["preTotal"],
-                    post_correct=kr["_calc"]["postCorrect"], post_total=kr["_calc"]["postTotal"],
-                    pval=kr.get("pval"),
-                )
+        st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
 
-        with right:
-            st.markdown("#### 🎯 Competence Shifts")
-            for lr in an["likertResults"]:
-                likert_bar_row(
-                    label=lr["label"],
-                    pre_mean=lr["pre"], post_mean=lr["post"],
-                    pre_n=lr["preN"], post_n=lr["postN"],
-                    pre_sum=lr["_calc"]["preSum"], post_sum=lr["_calc"]["postSum"],
-                )
+        left_col, right_col = st.columns([3, 2])
 
-            st.markdown("#### ⭐ Satisfaction")
-            for si in an["satItems"][:5]:
-                pct = round(si["mean"] / 5 * 100)
-                horiz_bar(si["label"][:60], pct, color="#a855f7", n=si["n"])
+        with left_col:
+            st.markdown(_section_label("KNOWLEDGE GAINS — PRE VS POST"), unsafe_allow_html=True)
+            if an["knowledgeResults"]:
+                for kr in an["knowledgeResults"]:
+                    render_knowledge_row(kr)
+            else:
+                st.info("No MCQ knowledge results. Ensure Score='1' in Key file.")
 
-    # ──────────────────────────────────────────────────────────────────────────
+        with right_col:
+            st.markdown(_section_label("COMPETENCE SHIFTS"), unsafe_allow_html=True)
+            if an["likertResults"]:
+                for lr in an["likertResults"]:
+                    delta = round(lr["post"] - lr["pre"], 2)
+                    sign  = "+" if delta >= 0 else ""
+                    label_s = lr["label"][:70] + ("…" if len(lr["label"])>70 else "")
+                    pre_pct  = round(lr["pre"]  / 5 * 100)
+                    post_pct = round(lr["post"] / 5 * 100)
+                    st.markdown(f"""
+<div style="padding:8px 0 6px;border-bottom:1px solid #0f1e3a;">
+  <div style="display:flex;justify-content:space-between;margin-bottom:5px;">
+    <span style="font-size:0.78rem;color:#cbd5e1;flex:1;">{label_s}</span>
+    {_badge(f"{sign}{delta}", "#14532d", "#4ade80")}
+  </div>
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:3px;">
+    <span style="font-size:0.62rem;color:#475569;width:26px;">PRE</span>
+    <div style="flex:1;">{_bar_html(pre_pct,'#ef4444',8)}</div>
+    <span style="font-size:0.72rem;color:#f87171;width:44px;text-align:right;">{lr['pre']:.2f}/5</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px;">
+    <span style="font-size:0.62rem;color:#475569;width:26px;">POST</span>
+    <div style="flex:1;">{_bar_html(post_pct,'#22c55e',8)}</div>
+    <span style="font-size:0.72rem;color:#4ade80;width:44px;text-align:right;">{lr['post']:.2f}/5</span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+            else:
+                st.info("No Likert competence items detected.")
+
+            st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
+            st.markdown(_section_label("SATISFACTION"), unsafe_allow_html=True)
+            # 4 mini donuts for intent/recommend/bias-free/content new
+            d1, d2, d3, d4 = st.columns(4)
+            render_eval_donut(d1, an["intendChangePct"],  "Intent to Change",     f"(n={an['withEval']:,})", "#a855f7")
+            render_eval_donut(d2, an["recommendPct"],     "Would Recommend",      f"(n={an['withEval']:,})", "#22c55e")
+            render_eval_donut(d3, an["biasFreeYes"],      "Bias-Free",            f"(n={an['withEval']:,})", "#3b82f6")
+            render_eval_donut(d4, an["avgContentNew"],    "Content Now",          f"(n={an['withEval']:,})", "#f59e0b")
+
+    # ─────────────────────────────────────────────────────────────────────────
     # TAB 1 — KNOWLEDGE
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     with tabs[1]:
-        st.markdown(f"### 📚 Knowledge Assessment — {len(an['knowledgeResults'])} Questions")
+        st.markdown(f"""
+<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:8px;padding:14px 18px;margin-bottom:16px;">
+  <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:.1em;color:#475569;font-weight:700;">QUESTION-BY-QUESTION KNOWLEDGE ANALYSIS</div>
+  <div style="font-size:0.75rem;color:#64748b;margin-top:4px;">Click <u>PRE</u> or <u>POST</u> labels to see the definition and exact calculation for each measure. Gain (pp) = percentage point change from pre to post.</div>
+</div>
+""", unsafe_allow_html=True)
+
         if not an["knowledgeResults"]:
-            st.info("No MCQ knowledge questions detected. Check that Score='1' is set in the Key file.")
-        for kr in an["knowledgeResults"]:
-            bar_row(
-                label=kr["label"],
-                pre_pct=kr["prePct"], post_pct=kr["postPct"],
-                gain=kr["gain"], key=f"kg_{kr['label'][:20]}",
-                correct=kr["correctAnswer"],
-                pre_correct=kr["_calc"]["preCorrect"], pre_total=kr["_calc"]["preTotal"],
-                post_correct=kr["_calc"]["postCorrect"], post_total=kr["_calc"]["postTotal"],
-                pval=kr.get("pval"),
-            )
+            st.warning("No MCQ knowledge questions found. Check that Score='1' is set in the Key file and questions have correct answers marked with *.")
+        else:
+            for kr in an["knowledgeResults"]:
+                render_knowledge_row(kr, full_width=True)
 
         if an["knowledgeResults"]:
-            gains = [k["gain"] for k in an["knowledgeResults"]]
-            st.markdown("---")
-            mcol1, mcol2, mcol3 = st.columns(3)
-            stat_card(mcol1, f"{an['avgKnowledgeGain']}pp", "Avg Knowledge Gain", "#22c55e")
-            stat_card(mcol2, f"{max(gains)}pp", "Highest Gain", "#3b82f6")
-            stat_card(mcol3, f"{min(gains)}pp", "Lowest Gain", "#f59e0b")
+            gains = [k["gain"] for k in an["knowledgeResults"] if k["gain"] is not None]
+            st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
+            s1,s2,s3 = st.columns(3)
+            for col, val, lbl, color in [
+                (s1, f"{an['avgKnowledgeGain']}pp", "Average Knowledge Gain", "#22c55e"),
+                (s2, f"{max(gains)}pp" if gains else "—",  "Highest Single Gain",   "#3b82f6"),
+                (s3, f"{min(gains)}pp" if gains else "—",  "Lowest Single Gain",    "#f59e0b"),
+            ]:
+                col.markdown(f"""
+<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:8px;padding:16px;text-align:center;">
+  <div style="font-size:1.8rem;font-weight:800;color:{color};">{val}</div>
+  <div style="font-size:0.72rem;color:#64748b;margin-top:4px;">{lbl}</div>
+</div>
+""", unsafe_allow_html=True)
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     # TAB 2 — COMPETENCE
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     with tabs[2]:
-        left2, right2 = st.columns(2)
-        with left2:
-            st.markdown("#### 🎯 Competence / Confidence Shifts (1–5 Scale)")
-            if not an["likertResults"]:
-                st.info("No Likert questions detected. Ensure Type or Orientation column contains 'Likert'.")
-            for lr in an["likertResults"]:
-                likert_bar_row(
-                    label=lr["label"],
-                    pre_mean=lr["pre"], post_mean=lr["post"],
-                    pre_n=lr["preN"], post_n=lr["postN"],
-                    pre_sum=lr["_calc"]["preSum"], post_sum=lr["_calc"]["postSum"],
-                )
+        left3, right3 = st.columns(2)
 
-        with right2:
-            st.markdown("#### 🔄 Practice Behavior Changes")
+        with left3:
+            st.markdown(f"""
+<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:8px;padding:12px 16px;margin-bottom:14px;">
+  <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:.1em;color:#475569;font-weight:700;">INTENDED BEHAVIOR CHANGES (N={an['withEval']:,})</div>
+</div>
+""", unsafe_allow_html=True)
             if an["behaviorChange"]:
-                for bc in an["behaviorChange"][:10]:
-                    horiz_bar(bc["label"][:70], bc["pct"], color="#22c55e", n=bc["n"])
+                for bc in an["behaviorChange"][:15]:
+                    render_horiz_bar(bc["label"], bc["pct"], "#f59e0b", bc["n"])
             else:
                 st.info("No behavior change items detected in evaluation data.")
 
-            st.markdown("#### 🚧 Barriers to Practice Change")
-            st.markdown("<span style='font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:.06em;'>BARRIERS TO PRACTICE CHANGE (% OF EVALUATORS CITING)</span>", unsafe_allow_html=True)
+            st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
+            st.markdown(f"""
+<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:8px;padding:12px 16px;margin-bottom:14px;">
+  <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:.1em;color:#475569;font-weight:700;">BARRIERS TO PRACTICE CHANGE (% OF EVALUATORS CITING)</div>
+</div>
+""", unsafe_allow_html=True)
             if an["barriers"]:
-                for bar in an["barriers"][:10]:
-                    horiz_bar(bar["label"][:70], bar["pct"], color="#ef4444", n=bar["n"])
+                for bar in an["barriers"][:15]:
+                    render_horiz_bar(bar["label"], bar["pct"], "#3b82f6", bar["n"])
             else:
                 st.info("No barrier items detected.")
 
-    # ──────────────────────────────────────────────────────────────────────────
+        with right3:
+            st.markdown(_section_label("COMPETENCE / CONFIDENCE SHIFTS (1–5 SCALE)"), unsafe_allow_html=True)
+            if an["likertResults"]:
+                for lr in an["likertResults"]:
+                    delta = round(lr["post"] - lr["pre"], 2)
+                    sign  = "+" if delta >= 0 else ""
+                    label_s = lr["label"][:80] + ("…" if len(lr["label"])>80 else "")
+                    pre_pct  = round(lr["pre"]  / 5 * 100)
+                    post_pct = round(lr["post"] / 5 * 100)
+                    st.markdown(f"""
+<div style="padding:10px 0;border-bottom:1px solid #0f1e3a;">
+  <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+    <span style="font-size:0.8rem;color:#cbd5e1;flex:1;">{label_s}</span>
+    {_badge(f"{sign}{delta}", "#14532d", "#4ade80")}
+  </div>
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+    <span style="font-size:0.62rem;color:#475569;width:28px;">PRE</span>
+    <div style="flex:1;">{_bar_html(pre_pct,'#ef4444',10)}</div>
+    <span style="font-size:0.75rem;color:#f87171;width:46px;text-align:right;">{lr['pre']:.2f}/5</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px;">
+    <span style="font-size:0.62rem;color:#475569;width:28px;">POST</span>
+    <div style="flex:1;">{_bar_html(post_pct,'#22c55e',10)}</div>
+    <span style="font-size:0.75rem;color:#4ade80;width:46px;text-align:right;">{lr['post']:.2f}/5</span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+            else:
+                st.info("No Likert competence items detected. Check Type or Orientation column contains 'Likert'.")
+
+    # ─────────────────────────────────────────────────────────────────────────
     # TAB 3 — EVALUATION
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     with tabs[3]:
-        st.markdown("### 📋 Evaluation Outcomes")
+        st.markdown(f"""
+<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:8px;padding:12px 18px;margin-bottom:16px;">
+  <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:.1em;color:#475569;font-weight:700;">SATISFACTION AND QUALITY METRICS (N={an['withEval']:,})</div>
+</div>
+""", unsafe_allow_html=True)
 
-        # 5 donuts
-        d1, d2, d3, d4, d5 = st.columns(5)
-        donut_metric(d1, an["intendChangePct"], "Intent to Change", "#22c55e")
-        donut_metric(d2, an["recommendPct"], "Recommend to Peers", "#3b82f6")
-        donut_metric(d3, an["biasFreeYes"], "Bias-Free", "#a855f7")
-        donut_metric(d4, an["avgContentNew"], "Content New", "#f59e0b")
+        # 5 large donuts
+        d1,d2,d3,d4,d5 = st.columns(5)
+        render_eval_donut(d1, an["intendChangePct"],  "Intent to change /\nmore confident",    f"(n={an['withEval']:,})", "#a855f7")
+        render_eval_donut(d2, an["recommendPct"],     "Would recommend\nprogram",              f"(n={an['withEval']:,})", "#22c55e")
+        render_eval_donut(d3, an["biasFreeYes"],      "Free of\ncommercial bias",              f"(n={an['withEval']:,})", "#3b82f6")
+        render_eval_donut(d4, an["avgContentNew"],    "Content was\nnew",                      f"(n={an['withEval']:,})", "#f59e0b")
+        render_eval_donut(d5, an["fuChangePct"] if an["withFU"] else 0, "Made practice\nchanges (follow-up)", f"(n={an['withFU']:,})", "#06b6d4")
+
+        st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
+
+        # Follow-up practice changes
         if an["withFU"] > 0:
-            donut_metric(d5, an["fuChangePct"], "Made Practice Changes", "#06b6d4")
-        else:
-            donut_metric(d5, 0, "Follow-Up (N/A)", "#475569")
-
-        st.markdown("---")
-
-        # Follow-up section
-        if an["withFU"] > 0:
-            st.markdown("#### 📅 Follow-Up Practice Changes")
+            st.markdown(f"""
+<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:8px;padding:12px 18px;margin-bottom:14px;">
+  <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:.1em;color:#475569;font-weight:700;">FOLLOW-UP PRACTICE CHANGES CONFIRMED (N={an['withFU']:,})</div>
+</div>
+""", unsafe_allow_html=True)
             for fu in an["fuBehaviorChange"][:8]:
-                horiz_bar(fu["label"][:70], fu["pct"], color="#06b6d4", n=fu["n"])
+                render_horiz_bar(fu["label"], fu["pct"], "#22c55e", fu["n"])
         else:
-            st.info("No follow-up data available.")
+            st.info("No follow-up data in uploaded files.")
 
-        st.markdown("---")
-        st.markdown("#### 🏭 Vendor Mix")
-        vcol1, vcol2 = st.columns(2)
+        # Vendor mix
+        st.markdown("""
+<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:8px;padding:12px 18px;margin-bottom:14px;">
+  <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:.1em;color:#475569;font-weight:700;">VENDOR MIX</div>
+</div>
+""", unsafe_allow_html=True)
         total_v = sum(an["vendors"].values()) or 1
-        for i, (vendor, vn) in enumerate(an["vendors"].items()):
-            col = vcol1 if i % 2 == 0 else vcol2
-            with col:
-                horiz_bar(vendor, round(100*vn/total_v), color="#3b82f6" if vendor=="Exchange" else "#a855f7", n=vn)
+        for vname, vn in an["vendors"].items():
+            pct_v = round(100*vn/total_v)
+            color_v = "#22c55e" if vname=="Nexus" else "#3b82f6"
+            st.markdown(f"""
+<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+  <span style="background:{color_v};color:#fff;border-radius:4px;padding:1px 8px;font-size:0.72rem;font-weight:700;width:70px;text-align:center;">{vname}</span>
+  <div style="flex:1;">{_bar_html(pct_v, color_v, 14)}</div>
+  <span style="font-size:0.78rem;color:{color_v};font-weight:700;width:80px;text-align:right;">{vn:,} ({pct_v}%)</span>
+</div>
+""", unsafe_allow_html=True)
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     # TAB 4 — AI INSIGHTS
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     with tabs[4]:
-        st.markdown("### 🔮 AI-Generated Insights")
-        if not st.session_state.ai_insights:
-            st.info("Click **Deep Insights** above to generate AI-powered analysis of this program's outcomes.")
-            # Show fallback auto-insights
-            insights = generate_ai_insights(an, program_name or "CME Program")
+        st.markdown("### 🔮 AI Insights")
+        if not st.session_state["ai_insights"]:
+            st.info("Click **Deep Insights** above to generate AI analysis.")
+            insights = generate_ai_insights(an, pn_display)
         else:
-            insights = st.session_state.ai_insights
+            insights = st.session_state["ai_insights"]
 
         for i, ins in enumerate(insights[:7]):
-            with st.expander(f"{'💡' if i%3==0 else '📈' if i%3==1 else '🎯'} {ins.get('title','Insight')}", expanded=(i<3)):
+            icon = ["💡","📈","🎯","🔬","📊","⚡","🏆"][i%7]
+            with st.expander(f"{icon} {ins.get('title','Insight')}", expanded=(i<3)):
                 st.markdown(ins.get("insight",""))
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     # TAB 5 — JCEHP ARTICLE
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     with tabs[5]:
         st.markdown("### 📄 JCEHP-Style Article")
-        if not st.session_state.jcehp_text:
-            st.info("Click **Write Article** above to generate a JCEHP-style manuscript from this program's outcomes.")
+        if not st.session_state["jcehp_text"]:
+            st.info("Click **Write Article** above to generate the manuscript.")
         else:
-            st.markdown(st.session_state.jcehp_text)
-            st.download_button(
-                "⬇ Download Article (.txt)",
-                st.session_state.jcehp_text,
-                file_name=f"{project_code or 'CME'}_JCEHP.txt",
-                mime="text/plain",
-            )
+            st.markdown(st.session_state["jcehp_text"])
+            st.download_button("⬇ Download (.txt)", st.session_state["jcehp_text"],
+                               f"{pc_display or 'CME'}_JCEHP.txt", "text/plain")
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     # TAB 6 — CIRCLE FRAMEWORK
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     with tabs[6]:
-        st.markdown("### 🔵 CIRCLE Framework Analysis")
+        completion_rate = an["preToPostRate"]
+        n_barriers = len(an["barriers"])
 
-        # 6 cards 2×3
-        circle_items = [
-            ("C", "Competence", f"{an['avgKnowledgeGain']}pp avg knowledge gain", "#3b82f6"),
-            ("I", "Independence", f"{an['biasFreeYes']}% rated bias-free", "#22c55e"),
-            ("R", "Relevance", f"{an['recommendPct']}% recommend to peers", "#a855f7"),
-            ("C", "Clinical Impact", f"{an['intendChangePct']}% intend to change practice", "#f59e0b"),
-            ("L", "Learner Engagement", f"{an['withPost']:,} completed pre/post assessment", "#06b6d4"),
-            ("E", "Evidence", f"{len(an['knowledgeResults'])} MCQ items assessed", "#ec4899"),
+        st.markdown(f"""
+<div style="font-size:0.72rem;color:#475569;padding:6px 0 10px;">
+  ACEhp Almanac, Feb 2026 &nbsp;·&nbsp; 6 dimensions mapped from your existing data &nbsp;·&nbsp; n={an['withEval']:,} evaluators
+</div>
+""", unsafe_allow_html=True)
+
+        circle_data = [
+            ("C", "Clinician\nengagement",  f"{completion_rate}%",       f"completion rate (n={an['total']:,})",   "#3b82f6", "gap"       if completion_rate < 50 else "strong"),
+            ("I", "Impact on\nlearning",    f"+{an['avgKnowledgeGain']}pp", f"avg knowledge gain (n={an['withPost']:,})", "#22c55e", "strong"),
+            ("R", "Relevance\nto gaps",     "0%",                         f"prior utilization (n={an['withEval']:,})", "#a855f7", "strong"),
+            ("C", "Change in\nbehavior",    f"{an['intendChangePct']}%",  f"intent to change (n={an['withEval']:,})", "#f59e0b", "strong"),
+            ("L", "Linkage to\npatients",   "0%",                         f"practice ready (n={an['withEval']:,})",   "#06b6d4", "proxied"),
+            ("E", "Ecosystem\nfactors",     str(n_barriers),              f"distinct barriers (n={an['withEval']:,})", "#ec4899", "new insight"),
         ]
 
-        r1c1, r1c2, r1c3 = st.columns(3)
-        r2c1, r2c2, r2c3 = st.columns(3)
-        for col, (letter, title, value, color) in zip([r1c1, r1c2, r1c3, r2c1, r2c2, r2c3], circle_items):
+        r1 = st.columns(3); r2 = st.columns(3)
+        for col, (letter, sub, val, note, color, badge_txt) in zip(list(r1)+list(r2), circle_data):
+            badge_color = {"gap":"#7f1d1d","strong":"#14532d","proxied":"#1e3a5f","new insight":"#4a1d96"}.get(badge_txt,"#334155")
+            badge_fg    = {"gap":"#fca5a5","strong":"#4ade80","proxied":"#60a5fa","new insight":"#c084fc"}.get(badge_txt,"#94a3b8")
             col.markdown(f"""
-            <div class="card" style="border-color:{color}44;text-align:center;">
-              <div style="font-size:2rem;font-weight:900;color:{color};">{letter}</div>
-              <div style="font-weight:700;color:#e2e8f0;margin-bottom:6px;">{title}</div>
-              <div style="color:#94a3b8;font-size:0.82rem;">{value}</div>
-            </div>
-            """, unsafe_allow_html=True)
+<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:10px;padding:20px 16px;text-align:center;margin-bottom:8px;">
+  <div style="font-size:2rem;font-weight:900;color:{color};font-style:italic;">{letter}</div>
+  <div style="font-size:0.68rem;color:#64748b;margin:2px 0 8px;white-space:pre-line;">{sub}</div>
+  <div style="font-size:1.8rem;font-weight:800;color:#e2e8f0;">{val}</div>
+  <div style="font-size:0.65rem;color:#475569;margin:4px 0 8px;">{note}</div>
+  <span style="background:{badge_color};color:{badge_fg};border-radius:20px;padding:2px 10px;font-size:0.65rem;font-weight:700;">{badge_txt}</span>
+</div>
+""", unsafe_allow_html=True)
 
         # Sub-tabs
-        ct1, ct2, ct3, ct4 = st.tabs(["C — Engagement", "C — Behavior Change", "E — Ecosystem Barriers", "L — Patient Linkage"])
+        ct1, ct2, ct3, ct4 = st.tabs(["C — Engagement", "C — Behavior change", "E — Ecosystem barriers", "L — Patient linkage"])
+
         with ct1:
-            st.markdown(f"**Total Learners:** {an['total']:,}")
-            st.markdown(f"**Pre+Post Completion:** {an['withPost']:,} ({an['preToPostRate']}%)")
-            for cred, n in list(an["credentials"].items())[:8]:
-                horiz_bar(cred, round(100*n/max(an["total"],1)), "#3b82f6", n=n)
+            st.markdown(f"""
+<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:8px;padding:16px 20px;margin-bottom:12px;">
+  <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:.1em;color:#475569;font-weight:700;margin-bottom:12px;">CLINICIAN ENGAGEMENT DEPTH</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;">
+    <div>
+      <div style="font-size:1.8rem;font-weight:800;color:#e2e8f0;">{an['total']:,}</div>
+      <div style="color:#3b82f6;font-size:0.72rem;text-decoration:underline;">Pre-test starters (n={an['total']:,})</div>
+      <div style="color:#475569;font-size:0.68rem;">all vendors</div>
+    </div>
+    <div>
+      <div style="font-size:1.8rem;font-weight:800;color:#ef4444;">{an['preOnly']:,}</div>
+      <div style="color:#ef4444;font-size:0.72rem;text-decoration:underline;">Pre-only drop-off (n={an['total']:,})</div>
+      <div style="color:#475569;font-size:0.68rem;">{100-completion_rate}% did not complete</div>
+    </div>
+    <div>
+      <div style="font-size:1.8rem;font-weight:800;color:#22c55e;">{an['withPost']:,}</div>
+      <div style="color:#22c55e;font-size:0.72rem;text-decoration:underline;">Full completers (n={an['total']:,})</div>
+      <div style="color:#475569;font-size:0.68rem;">{completion_rate}% completion</div>
+    </div>
+  </div>
+</div>
+<div style="border:1px solid #f59e0b;background:#1c1200;border-radius:8px;padding:10px 14px;">
+  <div style="font-size:0.62rem;text-transform:uppercase;letter-spacing:.1em;color:#f59e0b;font-weight:700;margin-bottom:4px;">CIRCLE INSIGHT</div>
+  <div style="color:#fbbf24;font-size:0.82rem;">Under CIRCLE, the {an['preOnly']:,} non-completers are a design signal — {100-completion_rate}% of pre-test starters dropped off before completing. Moore's has no mechanism for this; CIRCLE treats it as a first-order outcome about program format and engagement design.</div>
+</div>
+""", unsafe_allow_html=True)
+
         with ct2:
-            st.markdown("**Practice Behavior Changes Reported**")
-            for bc in an["behaviorChange"][:10]:
-                horiz_bar(bc["label"][:70], bc["pct"], "#22c55e", n=bc["n"])
+            st.markdown(f"""<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:8px;padding:12px 16px;margin-bottom:12px;">
+  <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:.1em;color:#475569;font-weight:700;">SPECIFIC BEHAVIOR CHANGE INTENTIONS (N={an['withEval']:,})</div>
+</div>""", unsafe_allow_html=True)
+            if an["behaviorChange"]:
+                for bc in an["behaviorChange"][:12]:
+                    render_horiz_bar(bc["label"], bc["pct"], "#f59e0b", bc["n"])
+            else:
+                st.info("No behavior change data detected.")
+
         with ct3:
-            st.markdown("**Barriers to Implementation**")
-            for bar in an["barriers"][:10]:
-                horiz_bar(bar["label"][:70], bar["pct"], "#ef4444", n=bar["n"])
+            st.markdown(f"""<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:8px;padding:12px 16px;margin-bottom:12px;">
+  <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:.1em;color:#475569;font-weight:700;">ECOSYSTEM BARRIERS (N={an['withEval']:,})</div>
+</div>""", unsafe_allow_html=True)
+            if an["barriers"]:
+                for bar in an["barriers"][:12]:
+                    render_horiz_bar(bar["label"], bar["pct"], "#3b82f6", bar["n"])
+            else:
+                st.info("No barrier items detected.")
+
         with ct4:
             st.info("Patient linkage data requires follow-up assessment instruments with patient outcome items.")
 
-        st.markdown("""
-        <div class="circle-insight">
-          <div class="circle-insight-lbl">CIRCLE INSIGHT</div>
-          <div style="color:#fbbf24;font-size:0.88rem;">
-            The CIRCLE Framework analysis indicates this program demonstrates measurable outcomes
-            across competence and clinical impact domains. Continued tracking of behavior change
-            and barrier reduction will strengthen the evidence base for grant renewal.
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     # TAB 7 — KIRKPATRICK
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     with tabs[7]:
-        st.markdown("### 🏛 Kirkpatrick Model Analysis")
-
-        kirk_data = [
-            (1, "Reaction", "Learner satisfaction and perceived value of the educational activity.",
-             f"{an['recommendPct']}% recommend · {an['biasFreeYes']}% bias-free · {an['avgContentNew']}% content new",
-             "#06b6d4"),
-            (2, "Learning", "Measurable gains in knowledge, competence, and confidence.",
-             f"{an['avgKnowledgeGain']}pp avg knowledge gain across {an['knowledgeCount']} MCQ items · "
-             f"{len(an['likertResults'])} competence items assessed",
-             "#3b82f6"),
-            (3, "Behavior", "Stated intent and reported changes in clinical practice.",
-             f"{an['intendChangePct']}% intend to change · {len(an['behaviorChange'])} distinct behaviors identified",
-             "#22c55e"),
-            (4, "Results", "Sustained change and downstream patient impact.",
-             f"{an['withFU']} follow-up respondents · {an['fuChangePct']}% confirmed practice change",
-             "#a855f7"),
-        ]
-
-        for num, title, desc, data, color in kirk_data:
-            st.markdown(f"""
-            <div class="kirk-card" style="border-left:4px solid {color};">
-              <div style="display:flex;align-items:flex-start;gap:16px;">
-                <div class="kirk-num" style="color:{color};">{num}</div>
-                <div style="flex:1;">
-                  <div class="kirk-title">{title}</div>
-                  <div style="color:#94a3b8;font-size:0.82rem;margin-top:4px;">{desc}</div>
-                  <div style="color:#e2e8f0;font-size:0.85rem;margin-top:8px;font-weight:500;">{data}</div>
-                </div>
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
-
         st.markdown("""
-        <div class="kirk-note">
-          ⚠️ <strong>Kirkpatrick Note:</strong> Level 4 (Results) data requires follow-up assessment
-          with sufficient sample size (n≥30) to draw statistically meaningful conclusions.
-          Current follow-up completion rates may limit Level 4 interpretations.
-        </div>
-        """, unsafe_allow_html=True)
+<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:8px;padding:14px 18px;margin-bottom:16px;">
+  <div style="font-size:1rem;font-weight:700;color:#e2e8f0;">Kirkpatrick Four-Level Evaluation Model</div>
+  <div style="font-size:0.78rem;color:#64748b;margin-top:4px;">The most widely recognized training evaluation framework globally. Four levels map directly to your program data — Reaction, Learning, Behavior, and Results. Useful alongside Moore's and CIRCLE for pharma partners unfamiliar with CME-specific frameworks.</div>
+  <div style="display:flex;gap:14px;margin-top:10px;">
+    <span style="background:#1e3a5f;color:#60a5fa;border-radius:20px;padding:3px 12px;font-size:0.72rem;font-weight:600;">1 Reaction</span>
+    <span style="background:#1e3a5f;color:#60a5fa;border-radius:20px;padding:3px 12px;font-size:0.72rem;font-weight:600;">2 Learning</span>
+    <span style="background:#1e3a5f;color:#60a5fa;border-radius:20px;padding:3px 12px;font-size:0.72rem;font-weight:600;">3 Behavior</span>
+    <span style="background:#1e3a5f;color:#60a5fa;border-radius:20px;padding:3px 12px;font-size:0.72rem;font-weight:600;">4 Results</span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
-    # ──────────────────────────────────────────────────────────────────────────
+        # Level 1 — Reaction (with donuts)
+        st.markdown(f"""
+<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:10px;padding:20px;margin-bottom:12px;">
+  <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:4px;">
+    <span style="font-size:1.8rem;font-weight:900;color:#3b82f6;">1</span>
+    <span style="font-size:1.1rem;font-weight:700;color:#e2e8f0;">Reaction</span>
+    <span style="font-size:0.72rem;color:#475569;">n={an['withEval']:,}</span>
+  </div>
+  <div style="font-size:0.75rem;color:#64748b;margin-bottom:14px;">Did participants find the program engaging, relevant, and free of bias? Measures immediate response to the learning experience.</div>
+""", unsafe_allow_html=True)
+        dk1,dk2,dk3,dk4 = st.columns(4)
+        render_eval_donut(dk1, an["recommendPct"],  "Would\nrecommend",       f"(n={an['withEval']:,})", "#f59e0b")
+        render_eval_donut(dk2, an["biasFreeYes"],   "Bias-free\ncontent",      f"(n={an['withEval']:,})", "#f59e0b")
+        render_eval_donut(dk3, an["avgContentNew"], "Content was\nnew",        f"(n={an['withEval']:,})", "#f59e0b")
+        render_eval_donut(dk4, an["preToPostRate"], "Eval completion\nrate",   f"(n={an['total']:,})",    "#f59e0b")
+        st.markdown(f"""
+  <div style="background:#1c1200;border:1px solid #78350f;border-radius:6px;padding:8px 14px;margin-top:12px;">
+    <span style="color:#fbbf24;font-size:0.78rem;"><strong>Kirkpatrick note</strong> — Level 1 alone is insufficient but necessary. High recommendation rate and low bias scores establish the credibility floor that makes Levels 2–4 findings defensible to pharma reviewers.</span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+        # Level 2 — Learning
+        st.markdown(f"""
+<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:10px;padding:20px;margin-bottom:12px;">
+  <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:4px;">
+    <span style="font-size:1.8rem;font-weight:900;color:#22c55e;">2</span>
+    <span style="font-size:1.1rem;font-weight:700;color:#e2e8f0;">Learning</span>
+    <span style="font-size:0.72rem;color:#475569;">n={an['withPost']:,}</span>
+  </div>
+  <div style="font-size:0.75rem;color:#64748b;margin-bottom:10px;">Did participants acquire knowledge and skills? Measured through pre/post assessment and self-efficacy shifts.</div>
+  <div style="font-size:0.7rem;color:#475569;margin-bottom:8px;">Knowledge acquisition — % correct responses pre vs post</div>
+""", unsafe_allow_html=True)
+        for kr in an["knowledgeResults"][:4]:
+            render_knowledge_row(kr)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # Level 3 — Behavior
+        st.markdown(f"""
+<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:10px;padding:20px;margin-bottom:12px;">
+  <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:4px;">
+    <span style="font-size:1.8rem;font-weight:900;color:#a855f7;">3</span>
+    <span style="font-size:1.1rem;font-weight:700;color:#e2e8f0;">Behavior</span>
+    <span style="font-size:0.72rem;color:#475569;">n={an['withEval']:,}</span>
+  </div>
+  <div style="font-size:0.75rem;color:#64748b;margin-bottom:10px;">Did participants intend to change their practice? Measured at evaluation and confirmed at follow-up.</div>
+""", unsafe_allow_html=True)
+        if an["behaviorChange"]:
+            for bc in an["behaviorChange"][:5]:
+                render_horiz_bar(bc["label"], bc["pct"], "#a855f7", bc["n"])
+        else:
+            st.info("No behavior change items detected.")
+        st.markdown(f"""
+  <div style="background:#1c1200;border:1px solid #78350f;border-radius:6px;padding:8px 14px;margin-top:10px;">
+    <span style="color:#fbbf24;font-size:0.78rem;"><strong>Kirkpatrick note</strong> — {an['intendChangePct']}% stated intent to change. Level 3 is the bridge between learning and real-world impact.</span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+        # Level 4 — Results
+        st.markdown(f"""
+<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:10px;padding:20px;margin-bottom:12px;">
+  <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:4px;">
+    <span style="font-size:1.8rem;font-weight:900;color:#06b6d4;">4</span>
+    <span style="font-size:1.1rem;font-weight:700;color:#e2e8f0;">Results</span>
+    <span style="font-size:0.72rem;color:#475569;">n={an['withFU']:,}</span>
+  </div>
+  <div style="font-size:0.75rem;color:#64748b;margin-bottom:10px;">Did changes in practice translate to measurable outcomes? Requires follow-up data.</div>
+  <div style="font-size:0.85rem;color:{'#4ade80' if an['withFU']>0 else '#ef4444'};">
+    {f"{an['fuChangePct']}% confirmed practice change at follow-up (n={an['withFU']})" if an['withFU']>0 else "⚠ No follow-up data available. Level 4 requires a follow-up survey instrument."}
+  </div>
+  <div style="background:#1c1200;border:1px solid #78350f;border-radius:6px;padding:8px 14px;margin-top:10px;">
+    <span style="color:#fbbf24;font-size:0.78rem;"><strong>Kirkpatrick note</strong> — Level 4 data requires follow-up assessment with sufficient sample size (n≥30) for statistically meaningful conclusions.</span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+    # ─────────────────────────────────────────────────────────────────────────
     # TAB 8 — KEY FINDINGS
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     with tabs[8]:
-        st.markdown("### 🔍 Key Findings")
-        st.markdown(f"<span style='color:#64748b;font-size:0.8rem;'>Files: {st.session_state.key_name} · {st.session_state.exch_name} · {st.session_state.nexus_name}</span>", unsafe_allow_html=True)
+        kn = st.session_state["key_name"]
+        en = st.session_state["exch_name"]
+        nn = st.session_state["nexus_name"]
+        st.markdown(f"""
+<div style="margin-bottom:16px;">
+  <div style="font-size:1.2rem;font-weight:800;color:#e2e8f0;">Key Findings &amp; Educational Impact</div>
+  <div style="font-size:0.72rem;color:#475569;margin-top:3px;">{en} · {nn} — Integritas Communications</div>
+</div>
+""", unsafe_allow_html=True)
 
-        st.markdown("#### Before vs. After")
-        kf_cols = st.columns(3)
-        kf_metrics = [
-            ("Avg Knowledge", f"{an['avgKnowledgeGain']}pp gain", "#22c55e"),
-            ("Intent to Change", f"{an['intendChangePct']}%", "#3b82f6"),
-            ("Peer Recommendation", f"{an['recommendPct']}%", "#a855f7"),
-        ]
-        for col, (label, val, color) in zip(kf_cols, kf_metrics):
-            col.markdown(f"""
-            <div class="card" style="text-align:center;border-color:{color}44;">
-              <div style="font-size:2.2rem;font-weight:800;color:{color};">{val}</div>
-              <div style="color:#94a3b8;font-size:0.8rem;margin-top:6px;">{label}</div>
-            </div>
-            """, unsafe_allow_html=True)
+        st.markdown("""
+<div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:.1em;color:#475569;font-weight:700;margin-bottom:10px;">KEY FINDINGS — PRIOR VS. AFTER PROGRAM</div>
+""", unsafe_allow_html=True)
 
-        st.markdown("#### Educational Impact")
-        imp_col1, imp_col2 = st.columns(2)
-        with imp_col1:
-            st.markdown(f"""
-            <div class="card-sm">
-              <div style="color:#22c55e;font-weight:700;font-size:1.1rem;">{an['withPost']:,}</div>
-              <div style="color:#94a3b8;font-size:0.78rem;">Learners completing pre/post assessment</div>
-            </div>
-            <div class="card-sm">
-              <div style="color:#3b82f6;font-weight:700;font-size:1.1rem;">{an['withEval']:,}</div>
-              <div style="color:#94a3b8;font-size:0.78rem;">Evaluation responses received</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with imp_col2:
-            st.markdown(f"""
-            <div class="card-sm">
-              <div style="color:#a855f7;font-weight:700;font-size:1.1rem;">{len(an['specialties'])}</div>
-              <div style="color:#94a3b8;font-size:0.78rem;">Distinct specialties represented</div>
-            </div>
-            <div class="card-sm">
-              <div style="color:#f59e0b;font-weight:700;font-size:1.1rem;">{an['withFU']:,}</div>
-              <div style="color:#94a3b8;font-size:0.78rem;">Follow-up assessments completed</div>
-            </div>
-            """, unsafe_allow_html=True)
+        kf_left, kf_right = st.columns(2)
 
-    # ──────────────────────────────────────────────────────────────────────────
+        with kf_left:
+            st.markdown('<div style="font-size:0.62rem;text-transform:uppercase;letter-spacing:.08em;color:#3b82f6;font-weight:700;margin-bottom:8px;">PRIOR TO THE PROGRAM</div>', unsafe_allow_html=True)
+            # Show lowest pre-scores as "before" data points
+            sorted_kr = sorted(an["knowledgeResults"], key=lambda x: x["prePct"])
+            for kr in sorted_kr[:2]:
+                label_s = kr["label"][:60]+"…" if len(kr["label"])>60 else kr["label"]
+                st.markdown(f"""
+<div style="display:flex;align-items:center;gap:14px;background:#0f1e3a;border:1px solid #1e293b;border-radius:10px;padding:16px;margin-bottom:10px;">
+  <div style="min-width:64px;height:64px;border-radius:50%;background:#1e293b;border:3px solid #3b82f6;display:flex;align-items:center;justify-content:center;">
+    <span style="font-size:1.3rem;font-weight:800;color:#60a5fa;">{kr['prePct']}%</span>
+  </div>
+  <div>
+    <div style="font-size:0.78rem;color:#e2e8f0;">Answered <em>{label_s}</em> correctly before the program</div>
+    <div style="font-size:0.68rem;color:#475569;margin-top:3px;">n={kr['_calc']['preTotal']:,} pre-test respondents</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+        with kf_right:
+            st.markdown('<div style="font-size:0.62rem;text-transform:uppercase;letter-spacing:.08em;color:#22c55e;font-weight:700;margin-bottom:8px;">AFTER PARTICIPATING IN THE PROGRAM</div>', unsafe_allow_html=True)
+            sorted_kr_post = sorted(an["knowledgeResults"], key=lambda x: x["postPct"], reverse=True)
+            for kr in sorted_kr_post[:2]:
+                label_s = kr["label"][:60]+"…" if len(kr["label"])>60 else kr["label"]
+                relative = round(100 * (kr["postPct"] - kr["prePct"]) / max(kr["prePct"],1)) if kr["prePct"] else 0
+                st.markdown(f"""
+<div style="display:flex;align-items:center;gap:14px;background:#0f1e3a;border:1px solid #1e293b;border-radius:10px;padding:16px;margin-bottom:10px;">
+  <div style="position:relative;min-width:64px;">
+    <div style="width:64px;height:64px;border-radius:50%;background:#1e293b;border:3px solid #22c55e;display:flex;align-items:center;justify-content:center;">
+      <span style="font-size:1.3rem;font-weight:800;color:#4ade80;">{kr['postPct']}%</span>
+    </div>
+    <div style="position:absolute;bottom:-6px;right:-6px;background:#14532d;color:#4ade80;border-radius:20px;padding:1px 6px;font-size:0.62rem;font-weight:700;">+{relative}%</div>
+  </div>
+  <div>
+    <div style="font-size:0.78rem;color:#e2e8f0;">Answered <em>{label_s}</em> correctly — <span style="color:#4ade80;">{relative}% relative increase</span> from baseline</div>
+    <div style="font-size:0.68rem;color:#475569;margin-top:3px;">n={kr['_calc']['postTotal']:,} matched pre/post</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+        # Educational Impact section
+        st.markdown("""
+<div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:.1em;color:#475569;font-weight:700;margin:16px 0 10px;">EDUCATIONAL IMPACT</div>
+""", unsafe_allow_html=True)
+
+        ei_left, ei_mid, ei_right = st.columns([2, 4, 2])
+        with ei_left:
+            for val, lbl, color in [
+                (f"{an['intendChangePct']}%", "Intend to change practice", "#f59e0b"),
+                (f"{an['recommendPct']}%",    "Would recommend to a colleague", "#22c55e"),
+            ]:
+                st.markdown(f"""
+<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+  <div style="width:52px;height:52px;border-radius:50%;background:#1e293b;border:3px solid {color};display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+    <span style="font-size:1rem;font-weight:800;color:{color};">{val}</span>
+  </div>
+  <div style="font-size:0.75rem;color:#cbd5e1;">{lbl}<br/><span style="color:#475569;font-size:0.65rem;">n={an['withEval']:,} evaluators</span></div>
+</div>
+""", unsafe_allow_html=True)
+
+        with ei_mid:
+            st.markdown('<div style="font-size:0.7rem;color:#64748b;margin-bottom:8px;">Intended behavior changes after the program</div>', unsafe_allow_html=True)
+            if an["behaviorChange"]:
+                for bc in an["behaviorChange"][:6]:
+                    render_horiz_bar(bc["label"], bc["pct"], "#f59e0b")
+            else:
+                st.info("No behavior change items.")
+
+        with ei_right:
+            for val, lbl, color in [
+                (f"{an['biasFreeYes']}%", "Agreed content was **free of commercial bias**", "#3b82f6"),
+                (f"{an['avgContentNew']}%", "Of content was **new** to learners", "#a855f7"),
+            ]:
+                st.markdown(f"""
+<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
+  <div style="width:52px;height:52px;border-radius:50%;background:#1e293b;border:3px solid {color};display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+    <span style="font-size:1rem;font-weight:800;color:{color};">{val}</span>
+  </div>
+  <div style="font-size:0.75rem;color:#cbd5e1;">{lbl}</div>
+</div>
+""", unsafe_allow_html=True)
+
+    # ─────────────────────────────────────────────────────────────────────────
     # TAB 9 — ADVANCED METRICS
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     with tabs[9]:
-        st.markdown("### 📐 Advanced Metrics")
+        st.markdown("""
+<div style="margin-bottom:16px;">
+  <div style="font-size:1.2rem;font-weight:800;color:#e2e8f0;">Advanced Outcomes Metrics</div>
+  <div style="font-size:0.75rem;color:#475569;">Six evidence-based measures that go beyond standard Moore's reporting — designed to differentiate Integritas outcomes packages in competitive grant applications.</div>
+</div>
+""", unsafe_allow_html=True)
 
-        # 1. Confidence-Competence Gap Index
-        st.markdown("#### 1️⃣ Confidence–Competence Gap Index")
-        am1, am2, am3 = st.columns(3)
-        stat_card(am1, f"{an['avgKnowledgeGain']}pp", "Avg Knowledge Gain (scaled)", "#3b82f6")
-        stat_card(am2, f"{an['avgLikertGain']}pp", "Avg Confidence Gain (scaled)", "#a855f7")
+        # ── 1. Confidence-Competence Gap Index ────────────────────────────
+        st.markdown(f"""
+<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:10px;padding:18px;margin-bottom:14px;">
+  <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:.1em;color:#475569;font-weight:700;margin-bottom:14px;">1. CONFIDENCE–COMPETENCE GAP INDEX (N={an['withEval']:,})</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;">
+""", unsafe_allow_html=True)
+
         gap = an["confidenceCompetenceGap"]
-        gap_color = "#22c55e" if abs(gap) < 10 else "#f59e0b" if abs(gap) < 20 else "#ef4444"
-        stat_card(am3, f"{gap:+.1f}", "Gap Index (Knowledge − Confidence)", gap_color)
-        with st.expander("📊 Gap Index Detail"):
-            st.markdown("""
-**WHAT IT MEANS:** Measures whether learners' objective knowledge gains (MCQ scores) align with their subjective confidence gains (Likert). A negative gap suggests overconfidence; a positive gap suggests knowledge gains outpace self-awareness.
+        kg_val = an["avgKnowledgeGain"]
+        lk_val = an["avgLikertGain"]
 
-**FORMULA:** `Gap = Avg MCQ Gain (pp) − Avg Likert Gain (scaled to 0–100)`
-""")
+        am_cols = st.columns(3)
+        for col, val, sub1, sub2, color in [
+            (am_cols[0], f"+{kg_val}pp" if kg_val else "—", "Avg knowledge gain", "MCQ pre → post", "#3b82f6"),
+            (am_cols[1], f"+{lk_val:.1f}" if lk_val else "—", "Confidence gain", "Likert scaled to 100", "#a855f7"),
+            (am_cols[2], f"{gap:+.1f}" if lk_val else "—", "Gap Index", "Knowledge − Confidence", "#22c55e" if abs(gap)<15 else "#f59e0b"),
+        ]:
+            col.markdown(f"""
+<div style="background:#111827;border:1px solid #1e293b;border-radius:8px;padding:16px;text-align:left;">
+  <div style="font-size:1.8rem;font-weight:800;color:{color};margin-bottom:4px;">{val}</div>
+  <div style="font-size:0.75rem;color:#e2e8f0;">{sub1}</div>
+  <div style="font-size:0.68rem;color:#475569;">{sub2}</div>
+  {'<div style="font-size:0.68rem;color:#64748b;margin-top:6px;">Requires both MCQ and Likert data</div>' if not lk_val and val=="—" else ''}
+</div>
+""", unsafe_allow_html=True)
 
-        st.markdown("---")
+        if not an["likertResults"]:
+            st.caption("Requires both knowledge MCQ questions and a confidence/self-efficacy Likert item in the evaluation instrument.")
 
-        # 2. Program Design Efficiency Score
-        st.markdown("#### 2️⃣ Program Design Efficiency Score")
-        eff_col1, eff_col2, eff_col3, eff_col4, eff_col5 = st.columns(5)
-        stat_card(eff_col1, f"{an['total']:,}", "Total Pre", "#94a3b8")
-        stat_card(eff_col2, f"{an['preToPostRate']}%", "Pre→Post Rate", "#3b82f6")
-        stat_card(eff_col3, f"{an['postToEvalRate']}%", "Post→Eval Rate", "#22c55e")
-        stat_card(eff_col4, f"{an['evalToFURate']}%", "Eval→FU Rate", "#f59e0b")
-        stat_card(eff_col5, f"{an['designEfficiencyScore']}", "Efficiency Score (0-100)", "#a855f7")
+        st.markdown("</div>", unsafe_allow_html=True)
 
-        # Funnel visual
+        # ── 2. Program Design Efficiency Score ────────────────────────────
+        pre2post  = an["preToPostRate"]
+        post2eval = an["postToEvalRate"]
+        eval2fu   = an["evalToFURate"]
+        eff       = an["designEfficiencyScore"]
+
         st.markdown(f"""
-        <div class="card" style="margin-top:8px;">
-          <div style="font-size:0.72rem;color:#64748b;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;">OVERALL FUNNEL</div>
-          <div style="display:flex;gap:4px;align-items:center;">
-            <div style="flex:{an['total']};background:#1e293b;border-radius:4px;padding:6px;text-align:center;font-size:0.78rem;color:#94a3b8;">Pre<br/>{an['total']}</div>
-            <div style="color:#475569;">→</div>
-            <div style="flex:{an['withPost']};background:#1e3a5f;border-radius:4px;padding:6px;text-align:center;font-size:0.78rem;color:#60a5fa;">Post<br/>{an['withPost']}</div>
-            <div style="color:#475569;">→</div>
-            <div style="flex:{max(an['withEval'],1)};background:#14532d;border-radius:4px;padding:6px;text-align:center;font-size:0.78rem;color:#4ade80;">Eval<br/>{an['withEval']}</div>
-            <div style="color:#475569;">→</div>
-            <div style="flex:{max(an['withFU'],1)};background:#422006;border-radius:4px;padding:6px;text-align:center;font-size:0.78rem;color:#fbbf24;">FU<br/>{an['withFU']}</div>
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:10px;padding:18px;margin-bottom:14px;">
+  <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:.1em;color:#475569;font-weight:700;margin-bottom:14px;">2. PROGRAM DESIGN EFFICIENCY SCORE (PARTICIPATION FUNNEL) (N={an['total']:,})</div>
+""", unsafe_allow_html=True)
 
-        st.markdown("---")
+        ef_cols = st.columns(4)
+        for col, val, sub1, sub2, color in [
+            (ef_cols[0], f"{pre2post}%",  "Pre → Post rate",   f"{an['withPost']:,} of {an['total']:,} continued", "#ef4444"),
+            (ef_cols[1], f"{post2eval}%", "Post → Eval rate",  f"{an['withEval']:,} of {an['withPost']:,} evaluated", "#f59e0b"),
+            (ef_cols[2], f"{eval2fu}%",   "Eval → Follow-up",  f"{an['withFU']:,} of {an['withEval']:,} responded",  "#3b82f6"),
+            (ef_cols[3], str(eff),        "Efficiency Score",  "0–100, higher is better", "#22c55e"),
+        ]:
+            col.markdown(f"""
+<div style="background:#111827;border:1px solid #1e293b;border-radius:8px;padding:16px;">
+  <div style="font-size:1.8rem;font-weight:800;color:{color};">{val}</div>
+  <div style="font-size:0.75rem;color:#e2e8f0;margin-top:2px;">{sub1}</div>
+  <div style="font-size:0.65rem;color:#475569;">{sub2}</div>
+</div>
+""", unsafe_allow_html=True)
 
-        # 3. Sustained Intent Confirmation Rate
-        st.markdown("#### 3️⃣ Sustained Intent Confirmation Rate")
-        si_col1, si_col2, si_col3 = st.columns(3)
-        stat_card(si_col1, f"{an['intendChangePct']}%", "Stated Intent (Eval)", "#3b82f6")
-        stat_card(si_col2, f"{an['fuChangePct']}%", "Confirmed Change (FU)", "#22c55e")
-        stat_card(si_col3, f"{an['sustainedIntentRate']}%", "Sustained Intent Rate (FU/Eval)", "#a855f7")
-
-        # Intent-to-action bar
-        ia_pct = an["sustainedIntentRate"]
+        st.markdown("<div style='margin-top:12px;'>", unsafe_allow_html=True)
+        st.markdown('<div style="font-size:0.7rem;color:#64748b;margin-bottom:4px;">Overall funnel efficiency</div>', unsafe_allow_html=True)
         st.markdown(f"""
-        <div class="card" style="margin-top:8px;">
-          <div style="font-size:0.72rem;color:#64748b;margin-bottom:6px;">INTENT → ACTION CONVERSION</div>
-          <div class="bar-wrap"><div style="background:#a855f7;height:20px;border-radius:4px;width:{ia_pct}%;"></div></div>
-          <div style="color:#a855f7;font-size:0.85rem;margin-top:4px;">{ia_pct}% of evaluators confirmed behavior change at follow-up</div>
-        </div>
-        """, unsafe_allow_html=True)
+<div style="display:flex;align-items:center;gap:6px;">
+  {_bar_html(eff, "#f59e0b", 18)}
+  <span style="color:#f59e0b;font-size:0.8rem;font-weight:700;width:36px;">{eff}%</span>
+</div>
+<div style="font-size:0.65rem;color:#334155;margin-top:3px;">Geometric mean of stage conversion rates</div>
+""", unsafe_allow_html=True)
 
-        st.markdown("---")
+        eff_interp = "Moderate — consider format or access improvements" if eff < 70 else "Strong — high funnel efficiency"
+        st.markdown(f'<div style="font-size:0.7rem;color:#94a3b8;margin-top:4px;">{eff_interp}</div>', unsafe_allow_html=True)
+        st.markdown("</div></div>", unsafe_allow_html=True)
 
-        # 4. Barrier Reduction Rate
-        st.markdown("#### 4️⃣ Barrier Reduction Rate")
+        # ── 3. Sustained Intent Confirmation Rate ─────────────────────────
+        stated_intent = an["intendChangePct"]
+        confirmed     = an["fuChangePct"]
+        sustained     = an["sustainedIntentRate"]
+        sus_color     = "#22c55e" if sustained >= 80 else "#f59e0b" if sustained >= 60 else "#ef4444"
+        sus_label     = "Excellent — intent is translating to action" if sustained >= 80 else "Moderate — follow-up reinforcement recommended"
+
+        st.markdown(f"""
+<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:10px;padding:18px;margin-bottom:14px;">
+  <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:.1em;color:#475569;font-weight:700;margin-bottom:14px;">3. SUSTAINED INTENT CONFIRMATION RATE (MOORE'S L4→L5 BRIDGE) (N={an['withFU']:,})</div>
+""", unsafe_allow_html=True)
+
+        si_cols = st.columns(3)
+        for col, val, sub1, sub2, color in [
+            (si_cols[0], f"{stated_intent}%",  "Stated intent (eval)",      f"n={an['withEval']:,} evaluators",  "#a855f7"),
+            (si_cols[1], f"{confirmed}%",       "Confirmed change (FU)",     f"n={an['withFU']:,} follow-up",     "#22c55e"),
+            (si_cols[2], f"{sustained}%",       "Sustained Intent Rate",     "L5 confirmation vs L4 intent",      sus_color),
+        ]:
+            col.markdown(f"""
+<div style="background:#111827;border:1px solid #1e293b;border-radius:8px;padding:16px;">
+  <div style="font-size:1.8rem;font-weight:800;color:{color};">{val}</div>
+  <div style="font-size:0.75rem;color:#e2e8f0;margin-top:2px;">{sub1}</div>
+  <div style="font-size:0.65rem;color:#475569;">{sub2}</div>
+  {'<div style="font-size:0.65rem;color:'+sus_color+';margin-top:6px;">'+sus_label+'</div>' if col==si_cols[2] else ''}
+</div>
+""", unsafe_allow_html=True)
+
+        st.markdown(f"""
+  <div style="margin-top:12px;">
+    <div style="font-size:0.7rem;color:#64748b;margin-bottom:4px;">Intent → Action conversion</div>
+    <div style="display:flex;align-items:center;gap:6px;">
+      {_bar_html(sustained, "#22c55e", 16)}
+      <span style="color:#22c55e;font-size:0.78rem;font-weight:700;width:36px;">{sustained}%</span>
+    </div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+        # ── 4. Barrier Reduction Rate ──────────────────────────────────────
+        st.markdown(f"""
+<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:10px;padding:18px;margin-bottom:14px;">
+  <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:.1em;color:#475569;font-weight:700;margin-bottom:12px;">4. BARRIER REDUCTION RATE (N={an['withFU']:,})</div>
+""", unsafe_allow_html=True)
+
         if an["barrierReductionData"]:
-            for br in an["barrierReductionData"][:5]:
-                b1, b2 = st.columns(2)
-                with b1:
-                    horiz_bar(f"EVAL: {br['label'][:50]}", br["evalPct"], "#ef4444")
-                with b2:
-                    horiz_bar(f"FU: {br['label'][:50]}", br["fuPct"], "#22c55e")
+            for br in an["barrierReductionData"][:6]:
+                delta_c = "#22c55e" if br["delta"] > 0 else "#ef4444"
+                delta_s = f"+{br['delta']}pp" if br["delta"] > 0 else f"{br['delta']}pp"
+                st.markdown(f"""
+<div style="margin-bottom:10px;">
+  <div style="display:flex;justify-content:space-between;margin-bottom:2px;">
+    <span style="font-size:0.75rem;color:#cbd5e1;">{br['label'][:70]}</span>
+    <span style="font-size:0.72rem;font-weight:700;color:{delta_c};">{delta_s}</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;">
+    <span style="font-size:0.6rem;color:#64748b;width:28px;">EVAL</span>
+    {_bar_html(br['evalPct'], '#f59e0b', 7)}
+    <span style="font-size:0.65rem;color:#fbbf24;width:28px;">{br['evalPct']}%</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:6px;">
+    <span style="font-size:0.6rem;color:#64748b;width:28px;">FU</span>
+    {_bar_html(br['fuPct'], '#ef4444', 7)}
+    <span style="font-size:0.65rem;color:#f87171;width:28px;">{br['fuPct']}%</span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
         else:
-            st.info("No barrier reduction data available (requires both eval and follow-up responses).")
+            st.info("Barrier reduction requires both evaluation and follow-up responses.")
 
         st.markdown("""
-        <div class="grant-insight">
-          <div class="grant-insight-lbl">GRANT INSIGHT</div>
-          <div style="color:#e2e8f0;font-size:0.85rem;">
-            Barrier reduction data demonstrates the sustained educational impact of this program
-            beyond the immediate learning event. Include this data in grant renewal submissions
-            to document real-world practice change facilitation.
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+  <div style="border:1px solid #0d9488;background:#0d1f1e;border-radius:6px;padding:10px 14px;margin-top:10px;">
+    <div style="font-size:0.62rem;text-transform:uppercase;letter-spacing:.1em;color:#0d9488;font-weight:700;margin-bottom:4px;">GRANT INSIGHT</div>
+    <div style="color:#e2e8f0;font-size:0.8rem;">Barrier reduction data converts static evaluation findings into longitudinal impact evidence — one of the strongest arguments for program renewal funding.</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
-        st.markdown("---")
+        # ── 5. Specialty-Stratified Knowledge Gap ─────────────────────────
+        skg = an["specialtyKnowledgeGaps"]
+        st.markdown(f"""
+<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:10px;padding:18px;margin-bottom:14px;">
+  <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:.1em;color:#475569;font-weight:700;margin-bottom:12px;">5. SPECIALTY-STRATIFIED KNOWLEDGE GAP (N={an['total']:,})</div>
+""", unsafe_allow_html=True)
 
-        # 5. Specialty-Stratified Knowledge Gap
-        st.markdown("#### 5️⃣ Specialty-Stratified Knowledge Gap")
-        if an["specialtyKnowledgeGaps"]:
-            for sg in sorted(an["specialtyKnowledgeGaps"], key=lambda x: x["prePct"])[:10]:
-                sg_col1, sg_col2 = st.columns([3, 1])
-                with sg_col1:
-                    st.markdown(f"""
-                    <div style="margin-bottom:4px;">
-                      <div style="font-size:0.78rem;color:#94a3b8;margin-bottom:2px;">{sg['specialty']} (n={sg['preN']})</div>
-                      <div style="display:flex;gap:4px;align-items:center;">
-                        <span style="font-size:0.65rem;color:#94a3b8;width:30px;">PRE</span>
-                        <div class="bar-wrap" style="flex:1;"><div class="bar-pre" style="width:{sg['prePct']}%;"></div></div>
-                        <span style="font-size:0.75rem;color:#f87171;width:38px;">{sg['prePct']}%</span>
-                      </div>
-                      <div style="display:flex;gap:4px;align-items:center;margin-top:2px;">
-                        <span style="font-size:0.65rem;color:#94a3b8;width:30px;">POST</span>
-                        <div class="bar-wrap" style="flex:1;"><div class="bar-post" style="width:{sg['postPct']}%;"></div></div>
-                        <span style="font-size:0.75rem;color:#60a5fa;width:38px;">{sg['postPct']}%</span>
-                      </div>
-                    </div>
-                    """, unsafe_allow_html=True)
+        if skg:
+            sorted_skg = sorted(skg, key=lambda x: x["prePct"])
+            for sg in sorted_skg[:10]:
+                st.markdown(f"""
+<div style="margin-bottom:8px;">
+  <div style="display:flex;justify-content:space-between;margin-bottom:2px;">
+    <span style="font-size:0.75rem;color:#cbd5e1;">{sg['specialty']}</span>
+    <span style="font-size:0.68rem;color:#475569;">n={sg['preN']:,}</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;">
+    <span style="font-size:0.6rem;color:#64748b;width:28px;">PRE</span>
+    {_bar_html(sg['prePct'], '#ef4444', 8)}
+    <span style="font-size:0.7rem;color:#f87171;font-weight:700;width:34px;text-align:right;">{sg['prePct']}%</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:6px;">
+    <span style="font-size:0.6rem;color:#64748b;width:28px;">POST</span>
+    {_bar_html(sg['postPct'], '#3b82f6', 8)}
+    <span style="font-size:0.7rem;color:#60a5fa;font-weight:700;width:34px;text-align:right;">{sg['postPct']}%</span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
         else:
-            st.info("Insufficient specialty data for stratified analysis (requires n≥3 per specialty).")
+            st.info("Insufficient specialty data (n≥3 per specialty required).")
 
         st.markdown("""
-        <div class="grant-insight">
-          <div class="grant-insight-lbl">GRANT INSIGHT</div>
-          <div style="color:#e2e8f0;font-size:0.85rem;">
-            Specialty-level gaps identify which clinician segments have the greatest unmet educational
-            need and the largest response to intervention. Use this for targeted program refinement
-            and grantor reporting.
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+  <div style="border:1px solid #0d9488;background:#0d1f1e;border-radius:6px;padding:10px 14px;margin-top:10px;">
+    <div style="font-size:0.62rem;text-transform:uppercase;letter-spacing:.1em;color:#0d9488;font-weight:700;margin-bottom:4px;">GRANT INSIGHT</div>
+    <div style="color:#e2e8f0;font-size:0.8rem;">Specialty-stratified gaps provide the needs assessment evidence for follow-on grant proposals targeting the lowest-performing subspecialties.</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
-        st.markdown("---")
-
-        # 6. Practice Setting Disparity Index
-        st.markdown("#### 6️⃣ Practice Setting Disparity Index")
+        # ── 6. Practice Setting Disparity Index ───────────────────────────
         psd = an["practiceSettingDisparity"]
-        ps_col1, ps_col2, ps_col3 = st.columns(3)
-        stat_card(ps_col1, f"{psd['academicPct']}%", "Academic Pre-Score", "#3b82f6")
-        stat_card(ps_col2, f"{psd['communityPct']}%", "Community Pre-Score", "#22c55e")
-        stat_card(ps_col3, f"{psd['gap']}pp", "Disparity Gap", "#ef4444" if psd["gap"]>10 else "#f59e0b")
+        st.markdown(f"""
+<div style="background:#0f1e3a;border:1px solid #1e293b;border-radius:10px;padding:18px;margin-bottom:14px;">
+  <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:.1em;color:#475569;font-weight:700;margin-bottom:8px;">6. PRACTICE SETTING DISPARITY INDEX (HEALTH EQUITY SIGNAL) (N={an['total']:,})</div>
+  <div style="font-size:0.72rem;color:#475569;margin-bottom:12px;">Requires Practice Type to be captured on the evaluation instrument. Currently {len(an['practiceTypes'])} practice types detected — expanding keyword matching may improve classification.</div>
+""", unsafe_allow_html=True)
 
-        if not an["practiceTypes"]:
-            st.caption("Practice type data not detected in uploaded files.")
+        if an["practiceTypes"]:
+            ps_cols = st.columns(3)
+            for col, val, lbl, color in [
+                (ps_cols[0], f"{psd['academicPct']}%", "Academic Pre-Score", "#3b82f6"),
+                (ps_cols[1], f"{psd['communityPct']}%","Community Pre-Score","#22c55e"),
+                (ps_cols[2], f"{psd['gap']}pp",        "Disparity Gap",      "#ef4444" if psd['gap']>10 else "#f59e0b"),
+            ]:
+                col.markdown(f"""
+<div style="background:#111827;border:1px solid #1e293b;border-radius:8px;padding:14px;text-align:center;">
+  <div style="font-size:1.6rem;font-weight:800;color:{color};">{val}</div>
+  <div style="font-size:0.72rem;color:#94a3b8;margin-top:4px;">{lbl}</div>
+</div>
+""", unsafe_allow_html=True)
+        else:
+            st.caption("No practice type data detected.")
+
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
