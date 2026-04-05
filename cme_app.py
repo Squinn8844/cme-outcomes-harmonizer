@@ -539,6 +539,28 @@ def _find_answer(rec_section_dict, q_text, threshold=MATCH_THRESHOLD):
     return None, None
 
 
+def _build_pct_src(src_dict, total_yes, total_total):
+    """Build Source Breakdown rows for a yes/no eval metric."""
+    rows = []
+    for src, (yes, tot) in sorted(src_dict.items()):
+        pct = round(100*yes/tot) if tot else 0
+        rows.append({"Source":src, "N":tot, "%":f"{pct}%", "Yes":yes})
+    combined_pct = round(100*total_yes/total_total) if total_total else 0
+    rows.append({"Source":"Combined", "N":total_total, "%":f"{combined_pct}%", "Yes":total_yes})
+    return rows
+
+def _build_avg_src(src_dict, all_vals):
+    """Build Source Breakdown rows for an average metric (e.g. content-new)."""
+    rows = []
+    for src, vals in sorted(src_dict.items()):
+        if not vals: continue
+        avg = round(sum(vals)/len(vals), 1)
+        rows.append({"Source":src, "N":len(vals), "Avg":f"{avg}%"})
+    if all_vals:
+        combined = [v/5*100 if v<=5 else v for v in all_vals]
+        rows.append({"Source":"Combined", "N":len(all_vals), "Avg":f"{round(sum(combined)/len(combined),1)}%"})
+    return rows
+
 def compute_analytics(questions, records, specialty_filter=None, credential_filter=None, vendor_filter=None):
     """
     Core analytics engine. Returns the analytics_json dict.
@@ -600,59 +622,65 @@ def compute_analytics(questions, records, specialty_filter=None, credential_filt
     all_kg = []
 
     for q in mcq_qs:
+        # Track totals AND per-vendor breakdowns
         pre_correct = 0; pre_total = 0
         post_correct = 0; post_total = 0
-
-        # find corresponding post question
-        post_q_text = q["q_text"]  # usually same text
+        src_stats = {}  # vendor -> {preCorrect, preTotal, postCorrect, postTotal}
 
         for rec in filtered:
-            # PRE
+            src = rec["_source"]
+            if src not in src_stats:
+                src_stats[src] = {"preCorrect":0,"preTotal":0,"postCorrect":0,"postTotal":0}
+            ss = src_stats[src]
+
             _, pre_ans = _find_answer(rec["pre"], q["q_text"])
             if pre_ans:
-                pre_total += 1
+                pre_total += 1; ss["preTotal"] += 1
                 if q["correct_answer"] and _norm(pre_ans) == _norm(q["correct_answer"]):
-                    pre_correct += 1
+                    pre_correct += 1; ss["preCorrect"] += 1
 
-            # POST — search post dict, also check post questions if available
             if rec["_has_post"]:
                 _, post_ans = _find_answer(rec["post"], q["q_text"])
                 if post_ans:
-                    post_total += 1
+                    post_total += 1; ss["postTotal"] += 1
                     if q["correct_answer"] and _norm(post_ans) == _norm(q["correct_answer"]):
-                        post_correct += 1
+                        post_correct += 1; ss["postCorrect"] += 1
 
         pre_pct  = round(100 * pre_correct  / pre_total,  1) if pre_total  else 0
         post_pct = round(100 * post_correct / post_total, 1) if post_total else 0
         gain = round(post_pct - pre_pct, 1)
         if gain: all_kg.append(gain)
 
-        # t-test
+        # Build per-vendor rows for the breakdown table
+        src_rows = []
+        for src, ss in src_stats.items():
+            sp = round(100*ss["preCorrect"]/ss["preTotal"],1) if ss["preTotal"] else 0
+            spo = round(100*ss["postCorrect"]/ss["postTotal"],1) if ss["postTotal"] else 0
+            src_rows.append({"Source":src,"N Pre":ss["preTotal"],"Pre %":f"{sp}%",
+                             "N Post":ss["postTotal"],"Post %":f"{spo}%",
+                             "Δ":f"{'+' if spo-sp>=0 else ''}{round(spo-sp,1)}pp"})
+        src_rows.append({"Source":"Combined","N Pre":pre_total,"Pre %":f"{pre_pct}%",
+                         "N Post":post_total,"Post %":f"{post_pct}%",
+                         "Δ":f"{'+' if gain>=0 else ''}{gain}pp"})
+
         pval = None
         if pre_total and post_total:
             try:
                 _, pval = stats.ttest_ind(
-                    [1]*pre_correct  + [0]*(pre_total  - pre_correct),
-                    [1]*post_correct + [0]*(post_total - post_correct)
+                    [1]*pre_correct + [0]*(pre_total-pre_correct),
+                    [1]*post_correct + [0]*(post_total-post_correct)
                 )
-            except Exception:
-                pass
+            except Exception: pass
 
         knowledge_results.append({
             "label": q["q_text"],
-            "prePct": pre_pct,
-            "postPct": post_pct,
-            "preN": pre_total,
-            "postN": post_total,
-            "gain": gain,
-            "correctAnswer": q["correct_answer"] or "",
+            "prePct": pre_pct, "postPct": post_pct,
+            "preN": pre_total, "postN": post_total,
+            "gain": gain, "correctAnswer": q["correct_answer"] or "",
             "pval": pval,
-            "_calc": {
-                "preCorrect": pre_correct,
-                "preTotal": pre_total,
-                "postCorrect": post_correct,
-                "postTotal": post_total,
-            }
+            "_calc": {"preCorrect":pre_correct,"preTotal":pre_total,
+                      "postCorrect":post_correct,"postTotal":post_total},
+            "_src": src_rows,
         })
 
     avg_kg = round(sum(all_kg) / len(all_kg), 1) if all_kg else 0
@@ -662,41 +690,53 @@ def compute_analytics(questions, records, specialty_filter=None, credential_filt
     likert_results = []
 
     for q in likert_qs:
-        pre_vals = []
-        post_vals = []
+        pre_vals = []; post_vals = []
+        src_pre = {}; src_post = {}  # vendor -> list of values
 
         for rec in filtered:
-            # PRE
+            src = rec["_source"]
             _, pre_ans = _find_answer(rec["pre"], q["q_text"])
             if pre_ans:
                 v = _likert_score(pre_ans)
-                if v: pre_vals.append(v)
+                if v:
+                    pre_vals.append(v)
+                    src_pre.setdefault(src, []).append(v)
 
-            # POST — also try eval for "will you now" variants
             if rec["_has_post"]:
                 _, post_ans = _find_answer(rec["post"], q["q_text"])
                 if not post_ans:
-                    # Try eval
                     _, post_ans = _find_answer(rec["eval"], q["q_text"])
                 if post_ans:
                     v = _likert_score(post_ans)
-                    if v: post_vals.append(v)
+                    if v:
+                        post_vals.append(v)
+                        src_post.setdefault(src, []).append(v)
 
         pre_mean  = round(sum(pre_vals)  / len(pre_vals),  2) if pre_vals  else 0
         post_mean = round(sum(post_vals) / len(post_vals), 2) if post_vals else 0
 
+        # Per-vendor breakdown rows
+        all_srcs = sorted(set(list(src_pre.keys()) + list(src_post.keys())))
+        lk_src_rows = []
+        for src in all_srcs:
+            sp  = round(sum(src_pre.get(src,[])) / len(src_pre[src]),2)  if src_pre.get(src)  else 0
+            spo = round(sum(src_post.get(src,[])) / len(src_post[src]),2) if src_post.get(src) else 0
+            lk_src_rows.append({"Source":src,
+                "N Pre":len(src_pre.get(src,[])),"Pre Mean":f"{sp}/5",
+                "N Post":len(src_post.get(src,[])),"Post Mean":f"{spo}/5",
+                "Δ":f"{'+' if spo-sp>=0 else ''}{round(spo-sp,2)}"})
+        lk_src_rows.append({"Source":"Combined",
+            "N Pre":len(pre_vals),"Pre Mean":f"{pre_mean}/5",
+            "N Post":len(post_vals),"Post Mean":f"{post_mean}/5",
+            "Δ":f"{'+' if post_mean-pre_mean>=0 else ''}{round(post_mean-pre_mean,2)}"})
+
         likert_results.append({
             "label": q["q_text"],
-            "pre": pre_mean,
-            "post": post_mean,
-            "preN": len(pre_vals),
-            "postN": len(post_vals),
-            "_calc": {
-                "preSum": sum(pre_vals),
-                "preN": len(pre_vals),
-                "postSum": sum(post_vals),
-                "postN": len(post_vals),
-            }
+            "pre": pre_mean, "post": post_mean,
+            "preN": len(pre_vals), "postN": len(post_vals),
+            "_calc": {"preSum":sum(pre_vals),"preN":len(pre_vals),
+                      "postSum":sum(post_vals),"postN":len(post_vals)},
+            "_src": lk_src_rows,
         })
 
     # ── Eval metrics (intent, recommend, bias-free, content new) ─────────────
@@ -709,6 +749,13 @@ def compute_analytics(questions, records, specialty_filter=None, credential_filt
     behavior_change = Counter()
     barriers = Counter()
     fu_behavior_change = Counter()
+    # Per-vendor breakdown trackers
+    _src_intent    = {}  # src -> [yes, total]
+    _src_recommend = {}
+    _src_bias      = {}
+    _src_content   = {}  # src -> list of pct values
+    _src_behaviors = {}  # src -> Counter
+    _src_barriers  = {}  # src -> Counter
 
     LIKERT_WORDS = {
         'strongly agree','agree','neutral','neither agree nor disagree',
@@ -748,39 +795,55 @@ def compute_analytics(questions, records, specialty_filter=None, credential_filt
     for rec in filtered:
         if not rec["_has_eval"]:
             continue
+        src = rec["_source"]
         for col, val in rec["eval"].items():
             cl = col.lower()
             vn = _norm(val)
 
             if any(k in cl for k in INTENT_KEYS):
                 intent_total += 1
-                if _is_yes(val): intent_yes += 1
+                sy = _is_yes(val)
+                if sy: intent_yes += 1
+                if src not in _src_intent: _src_intent[src] = [0,0]
+                _src_intent[src][1] += 1
+                if sy: _src_intent[src][0] += 1
 
             if any(k in cl for k in RECOMMEND_KEYS):
                 recommend_total += 1
-                if _is_yes(val): recommend_yes += 1
+                sy = _is_yes(val)
+                if sy: recommend_yes += 1
+                if src not in _src_recommend: _src_recommend[src] = [0,0]
+                _src_recommend[src][1] += 1
+                if sy: _src_recommend[src][0] += 1
 
             if any(k in cl for k in BIAS_KEYS):
                 bias_free_total += 1
-                if _is_yes(val): bias_free_yes += 1
+                sy = _is_yes(val)
+                if sy: bias_free_yes += 1
+                if src not in _src_bias: _src_bias[src] = [0,0]
+                _src_bias[src][1] += 1
+                if sy: _src_bias[src][0] += 1
 
             if any(k in cl for k in CONTENT_NEW_KEYS):
                 lv = _likert_score(val)
+                cv = None
                 if lv:
+                    cv = lv
                     content_new_vals.append(lv)
                 else:
-                    # Decimal percentage: 0.5 = 50%, 0.75 = 75% etc.
                     try:
                         fv = float(val)
                         if 0.0 <= fv <= 1.0:
-                            content_new_vals.append(fv * 100)  # store as 0-100
+                            cv = fv * 100; content_new_vals.append(cv)
                         elif 1.0 < fv <= 100.0:
-                            content_new_vals.append(fv)
+                            cv = fv; content_new_vals.append(cv)
                     except (ValueError, TypeError):
                         if vn in ("yes", "y"):
-                            content_new_vals.append(100)
+                            cv = 100; content_new_vals.append(100)
                         elif vn in ("no", "n"):
-                            content_new_vals.append(0)
+                            cv = 0; content_new_vals.append(0)
+                if cv is not None:
+                    _src_content.setdefault(src, []).append(cv)
 
             if any(k in cl for k in SAT_KEYS):
                 lv = _likert_score(val)
@@ -797,16 +860,19 @@ def compute_analytics(questions, records, specialty_filter=None, credential_filt
             is_checkbox_match = (val.lower()[:40] == col[:40].lower() and len(val) > 10)
             if is_behavior_col and val and not is_likert_val:
                 behavior_change[val[:120]] += 1
+                _src_behaviors.setdefault(src, Counter())[val[:120]] += 1
             elif is_checkbox_match and len(val) > 10:
                 behavior_change[val[:120]] += 1
+                _src_behaviors.setdefault(src, Counter())[val[:120]] += 1
 
-            # Barrier detection — similar logic
             is_barrier_col = any(k in cl for k in BARRIER_KEYS)
             is_barrier_checkbox = (val.lower()[:40] == col[:40].lower() and len(val) > 10)
             if is_barrier_col and val and not is_likert_val and vn not in ("none",):
                 barriers[val[:120]] += 1
+                _src_barriers.setdefault(src, Counter())[val[:120]] += 1
             elif is_barrier_checkbox and len(val) > 10 and not is_behavior_col:
                 barriers[val[:120]] += 1
+                _src_barriers.setdefault(src, Counter())[val[:120]] += 1
 
         # Follow-up behavior change
         if rec["_has_followup"]:
@@ -966,6 +1032,13 @@ def compute_analytics(questions, records, specialty_filter=None, credential_filt
         "knowledgeCount": len(knowledge_results),
         "aiInsightsCount": 7,
         "jcehpCount": 1,
+        # Per-vendor summary breakdowns for every eval metric
+        "_srcIntent":    _build_pct_src(_src_intent,    intent_yes,    intent_total),
+        "_srcRecommend": _build_pct_src(_src_recommend, recommend_yes, recommend_total),
+        "_srcBias":      _build_pct_src(_src_bias,      bias_free_yes, bias_free_total),
+        "_srcContentNew":_build_avg_src(_src_content,   content_new_vals),
+        "_srcBehaviors": _src_behaviors,
+        "_srcBarriers":  _src_barriers,
     }
 
 
@@ -982,137 +1055,8 @@ def stat_card(col, value, label, color="#3b82f6"):
     """, unsafe_allow_html=True)
 
 
-def bar_row(label, pre_pct, post_pct, gain, key, correct=None, pre_n=None, post_n=None,
-            pre_correct=None, pre_total=None, post_correct=None, post_total=None,
-            exchange_data=None, nexus_data=None, pval=None):
-    """Render a question row with pre/post bars and clickable popup."""
-    gain_color = "#22c55e" if gain >= 0 else "#ef4444"
-    gain_sign  = "+" if gain >= 0 else ""
-    pval_html  = f"<span style='color:#94a3b8;font-size:0.72rem;'>&nbsp;{_pval_str(pval)}</span>" if pval is not None else ""
-
-    st.markdown(f"""
-    <div class="card-sm" style="margin-bottom:6px;">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;">
-        <div style="font-size:0.82rem;color:#cbd5e1;flex:1;padding-right:12px;">{label}</div>
-        <div>
-          <span class="badge-green">{gain_sign}{gain}pp</span>
-          {pval_html}
-        </div>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:3px;">
-        <span style="font-size:0.68rem;color:#94a3b8;width:28px;">PRE</span>
-        <div class="bar-wrap" style="flex:1;">
-          <div class="bar-pre" style="width:{min(pre_pct,100)}%;"></div>
-        </div>
-        <span style="font-size:0.78rem;font-weight:600;color:#f87171;width:38px;text-align:right;">{pre_pct}%</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <span style="font-size:0.68rem;color:#94a3b8;width:28px;">POST</span>
-        <div class="bar-wrap" style="flex:1;">
-          <div class="bar-post" style="width:{min(post_pct,100)}%;"></div>
-        </div>
-        <span style="font-size:0.78rem;font-weight:600;color:#60a5fa;width:38px;text-align:right;">{post_pct}%</span>
-      </div>
-      {"" if not correct else f'<div style="font-size:0.68rem;color:#64748b;margin-top:4px;">✓ {correct}</div>'}
-    </div>
-    """, unsafe_allow_html=True)
-
-    with st.expander(f"📊 Detail: {label[:60]}…" if len(label)>60 else f"📊 Detail: {label}", expanded=False):
-        st.markdown("**WHAT IT MEANS**")
-        st.markdown("Percentage of learners who correctly answered this MCQ before (PRE) and after (POST) the educational activity.")
-        st.markdown("**FORMULA**")
-        st.code("Knowledge Score (%) = (Correct Responses / Total Responses) × 100")
-        st.markdown("**ACTUAL CALCULATION**")
-        if pre_total is not None and post_total is not None:
-            st.markdown(f"""
-- **PRE:** {pre_correct}/{pre_total} = **{pre_pct}%**
-- **POST:** {post_correct}/{post_total} = **{post_pct}%**
-- **Gain:** {gain_sign}{gain} percentage points
-{f'- **{_pval_str(pval)}**' if pval is not None else ''}
-""")
-        if correct:
-            st.markdown(f"**Correct Answer:** {correct}")
-        if exchange_data or nexus_data:
-            st.markdown("**DATA SOURCE BREAKDOWN**")
-            rows_data = []
-            if exchange_data:
-                rows_data.append({"Source": "Exchange", **exchange_data})
-            if nexus_data:
-                rows_data.append({"Source": "Nexus", **nexus_data})
-            if rows_data:
-                df_src = pd.DataFrame(rows_data)
-                st.dataframe(df_src, hide_index=True, use_container_width=True)
 
 
-def likert_bar_row(label, pre_mean, post_mean, pre_n, post_n, pre_sum=None, post_sum=None):
-    """Render a Likert competence row."""
-    delta = round(post_mean - pre_mean, 2)
-    sign  = "+" if delta >= 0 else ""
-    color = "#22c55e" if delta >= 0 else "#ef4444"
-
-    # scale bars to 0-100%
-    pre_pct  = round(pre_mean  / 5 * 100)
-    post_pct = round(post_mean / 5 * 100)
-
-    st.markdown(f"""
-    <div class="card-sm">
-      <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
-        <div style="font-size:0.82rem;color:#cbd5e1;flex:1;">{label}</div>
-        <span class="badge-green">{sign}{delta}</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:3px;">
-        <span style="font-size:0.68rem;color:#94a3b8;width:28px;">PRE</span>
-        <div class="bar-wrap" style="flex:1;"><div class="bar-pre" style="width:{pre_pct}%;"></div></div>
-        <span style="font-size:0.78rem;font-weight:600;color:#f87171;width:50px;text-align:right;">{pre_mean:.2f}/5</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <span style="font-size:0.68rem;color:#94a3b8;width:28px;">POST</span>
-        <div class="bar-wrap" style="flex:1;"><div class="bar-post" style="width:{post_pct}%;"></div></div>
-        <span style="font-size:0.78rem;font-weight:600;color:#60a5fa;width:50px;text-align:right;">{post_mean:.2f}/5</span>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    with st.expander(f"📊 Detail: {label[:60]}…" if len(label)>60 else f"📊 Detail: {label}", expanded=False):
-        st.markdown("**WHAT IT MEANS**")
-        st.markdown("Mean Likert score (1–5 scale) reflecting learner self-reported competence/confidence before vs. after the activity.")
-        st.markdown("**FORMULA**")
-        st.code("Mean Score = Σ(Likert Values) / n")
-        st.markdown("**ACTUAL CALCULATION**")
-        if pre_sum is not None:
-            st.markdown(f"""
-- **PRE:** {pre_sum}/{pre_n} responses → mean = **{pre_mean:.2f}**
-- **POST:** {post_sum}/{post_n} responses → mean = **{post_mean:.2f}**
-- **Δ Change:** {sign}{delta}
-""")
-
-
-def donut_metric(col, pct, label, color="#3b82f6"):
-    """Simple large percentage display."""
-    col.markdown(f"""
-    <div class="donut-wrap card" style="border-color:{color}33;">
-      <div class="donut-pct" style="color:{color}">{pct}%</div>
-      <div class="donut-lbl">{label}</div>
-    </div>
-    """, unsafe_allow_html=True)
-    with col:
-        with st.expander("📊 Detail", expanded=False):
-            st.markdown(f"**{label}**")
-            st.markdown("Percentage of respondents answering affirmatively to this evaluation item.")
-            st.code(f"% = (Affirmative responses / Total responses) × 100")
-
-
-def horiz_bar(label, pct, color="#3b82f6", n=None):
-    n_str = f"  <span style='color:#64748b;font-size:0.7rem;'>n={n}</span>" if n else ""
-    st.markdown(f"""
-    <div style="margin-bottom:6px;">
-      <div style="display:flex;justify-content:space-between;margin-bottom:2px;">
-        <span style="font-size:0.78rem;color:#cbd5e1;">{label}</span>
-        <span style="font-size:0.78rem;font-weight:600;color:{color};">{pct}%{n_str}</span>
-      </div>
-      <div class="bar-wrap"><div style="background:{color};height:14px;border-radius:4px;width:{min(pct,100)}%;"></div></div>
-    </div>
-    """, unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1274,7 +1218,39 @@ def _section_label(text):
     return f'<div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:.1em;color:#475569;font-weight:700;margin-bottom:10px;">{text}</div>'
 
 
-def render_knowledge_row(q, full_width=False):
+def _src_table(src_rows):
+    """Render a styled source breakdown table from a list of dicts."""
+    if not src_rows:
+        st.caption("No per-vendor data available.")
+        return
+    import pandas as pd
+    df = pd.DataFrame(src_rows)
+    # Style the Combined row
+    def _style(row):
+        if row.get("Source","") == "Combined":
+            return ["font-weight:700;color:#60a5fa"] * len(row)
+        return [""] * len(row)
+    st.dataframe(df, hide_index=True, use_container_width=True)
+    st.markdown('<div style="background:#0d2a1a;border:1px solid #166534;border-radius:5px;'
+                'padding:6px 12px;font-size:0.72rem;color:#4ade80;margin-top:4px;">'
+                '✓ Exchange and Nexus data included in combined calculation</div>',
+                unsafe_allow_html=True)
+
+
+def detail_popup(metric_name, what_it_means, formula, actual_calc, src_rows, popup_key):
+    """Reusable expander popup with WHAT IT MEANS / FORMULA / ACTUAL CALCULATION / DATA SOURCE BREAKDOWN."""
+    with st.expander(f"🔍 {metric_name} — click for detail", expanded=False, key=f"dp_{popup_key}"):
+        st.markdown(f"**WHAT IT MEANS**")
+        st.markdown(what_it_means)
+        st.markdown("**FORMULA**")
+        st.code(formula, language="text")
+        st.markdown("**ACTUAL CALCULATION**")
+        st.code(actual_calc, language="text")
+        st.markdown("**DATA SOURCE BREAKDOWN**")
+        _src_table(src_rows)
+
+
+def render_knowledge_row(q, full_width=False, tab_id=""):
     """Render one knowledge question row — pre/post bars + gain badge + popup."""
     pre  = q["prePct"]; post = q["postPct"]; gain = q["gain"]
     gain_col = "#22c55e" if gain >= 0 else "#ef4444"
@@ -1316,6 +1292,7 @@ def render_knowledge_row(q, full_width=False):
     post_c = calc.get("postCorrect", "—")
     post_t = calc.get("postTotal",   "—")
 
+    _ukey = abs(hash(label_trunc + tab_id))
     with st.expander(f"🔍 PRE  |  POST  — click for detail", expanded=False):
         col_a, col_b = st.columns(2)
         with col_a:
@@ -1329,17 +1306,13 @@ def render_knowledge_row(q, full_width=False):
         st.markdown("**ACTUAL CALCULATION**")
         st.code(f"Pre:  {pre_c}/{pre_t} = {pre}%\nPost: {post_c}/{post_t} = {post}% (Δ{sign}{gain}pp)\n\nCorrect answer: {correct or 'N/A'}", language="text")
         st.markdown("**DATA SOURCE BREAKDOWN**")
-        st.markdown(f"""
-| Source | N Pre | Pre % | N Post | Post % | Δ |
-|--------|-------|-------|--------|--------|---|
-| Combined | {pre_t} | {pre}% | {post_t} | {post}% | {sign}{gain}pp |
-""")
-        st.markdown('<div style="background:#0d2a1a;border:1px solid #166534;border-radius:6px;padding:8px 12px;font-size:0.75rem;color:#4ade80;">✓ All vendor data included in combined calculation</div>', unsafe_allow_html=True)
+        _src_table(q.get("_src", []))
         col_x, col_y = st.columns([1,1])
-        col_x.button("Copy to Clipboard", key=f"cp_{label_trunc[:20]}", disabled=True)
+        col_x.button("Copy to Clipboard", key=f"cp_{_ukey}", disabled=True)
 
 
-def render_horiz_bar(label, pct, color="#f59e0b", n=None, show_n_inline=True):
+def render_horiz_bar(label, pct, color="#f59e0b", n=None, show_n_inline=True,
+                     src_rows=None, popup_key=None, metric_type=""):
     n_html = f' <a href="#" style="color:#475569;font-size:0.68rem;text-decoration:none;">(n={n})</a>' if n else ""
     label_short = label[:80] + ("…" if len(label) > 80 else "")
     st.markdown(f"""
@@ -1351,9 +1324,18 @@ def render_horiz_bar(label, pct, color="#f59e0b", n=None, show_n_inline=True):
   {_bar_html(pct, color, 8)}
 </div>
 """, unsafe_allow_html=True)
+    if src_rows and popup_key:
+        detail_popup(
+            label_short[:40],
+            f"Percentage of respondents selecting this {metric_type or 'item'}.",
+            f"% = (n selecting this item / total respondents) × 100",
+            f"Selected: n={n}  |  {pct}% of evaluators",
+            src_rows,
+            popup_key=popup_key
+        )
 
 
-def render_eval_donut(col, pct, label, sublabel, color):
+def render_eval_donut(col, pct, label, sublabel, color, src_rows=None, popup_key=""):
     col.markdown(f"""
 <div style="text-align:center;padding:20px 10px 10px;">
   {_donut_svg(pct, color, size=100, stroke=10)}
@@ -1361,6 +1343,16 @@ def render_eval_donut(col, pct, label, sublabel, color):
   <div style="font-size:0.68rem;color:#475569;margin-top:2px;">{sublabel}</div>
 </div>
 """, unsafe_allow_html=True)
+    if src_rows is not None and popup_key:
+        with col:
+            detail_popup(
+                label.replace("\n", " "),
+                f"Percentage of evaluators who responded affirmatively to this item.",
+                "% = (Affirmative responses / Total responses) × 100",
+                f"Result: {pct}%  —  {sublabel}",
+                src_rows,
+                popup_key=popup_key
+            )
 
 
 def main():
@@ -1682,7 +1674,7 @@ def main():
             st.markdown(_section_label("KNOWLEDGE GAINS — PRE VS POST"), unsafe_allow_html=True)
             if an["knowledgeResults"]:
                 for kr in an["knowledgeResults"]:
-                    render_knowledge_row(kr)
+                    render_knowledge_row(kr, tab_id="ov")
             else:
                 st.info("No MCQ knowledge results. Ensure Score='1' in Key file.")
 
@@ -1713,6 +1705,14 @@ def main():
   </div>
 </div>
 """, unsafe_allow_html=True)
+                    detail_popup(
+                        label_s[:40],
+                        "Mean Likert score (1–5) reflecting self-reported competence/confidence before vs. after the activity.",
+                        "Mean = Σ(Likert values) / n  |  Δ = Post mean − Pre mean",
+                        f"PRE:  {lr['_calc']['preSum']} / {lr['_calc']['preN']} = {lr['pre']:.2f}/5\nPOST: {lr['_calc']['postSum']} / {lr['_calc']['postN']} = {lr['post']:.2f}/5\nΔ: {'+' if delta>=0 else ''}{delta}",
+                        lr.get("_src", []),
+                        popup_key=f"ov_lk_{abs(hash(label_s))}"
+                    )
             else:
                 st.info("No Likert competence items detected.")
 
@@ -1720,10 +1720,10 @@ def main():
             st.markdown(_section_label("SATISFACTION"), unsafe_allow_html=True)
             # 4 mini donuts for intent/recommend/bias-free/content new
             d1, d2, d3, d4 = st.columns(4)
-            render_eval_donut(d1, an["intendChangePct"],  "Intent to Change",     f"(n={an['withEval']:,})", "#a855f7")
-            render_eval_donut(d2, an["recommendPct"],     "Would Recommend",      f"(n={an['withEval']:,})", "#22c55e")
-            render_eval_donut(d3, an["biasFreeYes"],      "Bias-Free",            f"(n={an['withEval']:,})", "#3b82f6")
-            render_eval_donut(d4, an["avgContentNew"],    "Content Now",          f"(n={an['withEval']:,})", "#f59e0b")
+            render_eval_donut(d1, an["intendChangePct"],  "Intent to Change",     f"(n={an['withEval']:,})", "#a855f7", an.get("_srcIntent"),    "ov_intent")
+            render_eval_donut(d2, an["recommendPct"],     "Would Recommend",      f"(n={an['withEval']:,})", "#22c55e", an.get("_srcRecommend"), "ov_recommend")
+            render_eval_donut(d3, an["biasFreeYes"],      "Bias-Free",            f"(n={an['withEval']:,})", "#3b82f6", an.get("_srcBias"),      "ov_bias")
+            render_eval_donut(d4, an["avgContentNew"],    "Content Now",          f"(n={an['withEval']:,})", "#f59e0b", an.get("_srcContentNew"),"ov_content")
 
     # ─────────────────────────────────────────────────────────────────────────
     # TAB 1 — KNOWLEDGE
@@ -1740,7 +1740,7 @@ def main():
             st.warning("No MCQ knowledge questions found. Check that Score='1' is set in the Key file and questions have correct answers marked with *.")
         else:
             for kr in an["knowledgeResults"]:
-                render_knowledge_row(kr, full_width=True)
+                render_knowledge_row(kr, full_width=True, tab_id="kg")
 
         if an["knowledgeResults"]:
             gains = [k["gain"] for k in an["knowledgeResults"] if k["gain"] is not None]
@@ -1772,7 +1772,15 @@ def main():
 """, unsafe_allow_html=True)
             if an["behaviorChange"]:
                 for bc in an["behaviorChange"][:15]:
-                    render_horiz_bar(bc["label"], bc["pct"], "#f59e0b", bc["n"])
+                    src_bc = []
+                    for src, ctr in an.get("_srcBehaviors",{}).items():
+                        sn = ctr.get(bc["label"],0)
+                        src_bc.append({"Source":src,"N":sn,"% of src":f"{round(100*sn/max(sum(ctr.values()),1),1)}%"})
+                    if src_bc:
+                        src_bc.append({"Source":"Combined","N":bc["n"],"% of src":f"{bc['pct']}%"})
+                    render_horiz_bar(bc["label"], bc["pct"], "#f59e0b", bc["n"],
+                                     src_rows=src_bc if src_bc else None,
+                                     popup_key=f"bc_{abs(hash(bc['label']))}", metric_type="behavior change")
             else:
                 st.info("No behavior change items detected in evaluation data.")
 
@@ -1784,7 +1792,15 @@ def main():
 """, unsafe_allow_html=True)
             if an["barriers"]:
                 for bar in an["barriers"][:15]:
-                    render_horiz_bar(bar["label"], bar["pct"], "#3b82f6", bar["n"])
+                    src_bar = []
+                    for src, ctr in an.get("_srcBarriers",{}).items():
+                        sn = ctr.get(bar["label"],0)
+                        src_bar.append({"Source":src,"N":sn,"% of src":f"{round(100*sn/max(sum(ctr.values()),1),1)}%"})
+                    if src_bar:
+                        src_bar.append({"Source":"Combined","N":bar["n"],"% of src":f"{bar['pct']}%"})
+                    render_horiz_bar(bar["label"], bar["pct"], "#3b82f6", bar["n"],
+                                     src_rows=src_bar if src_bar else None,
+                                     popup_key=f"br_{abs(hash(bar['label']))}", metric_type="barrier")
             else:
                 st.info("No barrier items detected.")
 
@@ -1815,6 +1831,14 @@ def main():
   </div>
 </div>
 """, unsafe_allow_html=True)
+                    detail_popup(
+                        label_s[:40],
+                        "Mean Likert score (1–5) reflecting self-reported competence/confidence before vs. after the activity.",
+                        "Mean = Σ(Likert values) / n  |  Δ = Post mean − Pre mean",
+                        f"PRE:  {lr['_calc']['preSum']} / {lr['_calc']['preN']} = {lr['pre']:.2f}/5\nPOST: {lr['_calc']['postSum']} / {lr['_calc']['postN']} = {lr['post']:.2f}/5\nΔ: {'+' if delta>=0 else ''}{delta}",
+                        lr.get("_src", []),
+                        popup_key=f"comp_lk_{abs(hash(label_s))}"
+                    )
             else:
                 st.info("No Likert competence items detected. Check Type or Orientation column contains 'Likert'.")
 
@@ -1830,10 +1854,10 @@ def main():
 
         # 5 large donuts
         d1,d2,d3,d4,d5 = st.columns(5)
-        render_eval_donut(d1, an["intendChangePct"],  "Intent to change /\nmore confident",    f"(n={an['withEval']:,})", "#a855f7")
-        render_eval_donut(d2, an["recommendPct"],     "Would recommend\nprogram",              f"(n={an['withEval']:,})", "#22c55e")
-        render_eval_donut(d3, an["biasFreeYes"],      "Free of\ncommercial bias",              f"(n={an['withEval']:,})", "#3b82f6")
-        render_eval_donut(d4, an["avgContentNew"],    "Content was\nnew",                      f"(n={an['withEval']:,})", "#f59e0b")
+        render_eval_donut(d1, an["intendChangePct"],  "Intent to change /\nmore confident",    f"(n={an['withEval']:,})", "#a855f7", an.get("_srcIntent"),    "ev_intent")
+        render_eval_donut(d2, an["recommendPct"],     "Would recommend\nprogram",              f"(n={an['withEval']:,})", "#22c55e", an.get("_srcRecommend"), "ev_recommend")
+        render_eval_donut(d3, an["biasFreeYes"],      "Free of\ncommercial bias",              f"(n={an['withEval']:,})", "#3b82f6", an.get("_srcBias"),      "ev_bias")
+        render_eval_donut(d4, an["avgContentNew"],    "Content was\nnew",                      f"(n={an['withEval']:,})", "#f59e0b", an.get("_srcContentNew"),"ev_content")
         render_eval_donut(d5, an["fuChangePct"] if an["withFU"] else 0, "Made practice\nchanges (follow-up)", f"(n={an['withFU']:,})", "#06b6d4")
 
         st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
@@ -1918,8 +1942,25 @@ def main():
             ("E", "Ecosystem\nfactors",     str(n_barriers),              f"distinct barriers (n={an['withEval']:,})", "#ec4899", "new insight"),
         ]
 
+        # CIRCLE src breakdown data per dimension
+        circle_src_data = [
+            an.get("_srcRecommend", []),    # C — engagement (proxy: recommend)
+            [{"Source":"Combined","N":an["withPost"],"Avg":f"+{an['avgKnowledgeGain']}pp"}],  # I
+            [],                              # R — no prior utilization data
+            an.get("_srcIntent", []),        # C — behavior
+            [],                              # L — linkage
+            [{"Source":"Combined","N":an["withEval"],"Avg":f"{len(an['barriers'])} barriers"}],  # E
+        ]
+        circle_formulas = [
+            "Completion rate = With Post / Total Pre × 100",
+            "Avg knowledge gain = mean(Post% − Pre%) across MCQ items",
+            "Prior utilization = % who used content before this activity",
+            "Intent to change = % of evaluators stating intent",
+            "Practice ready = % with follow-up confirmation",
+            "Distinct barriers = count of unique barrier items cited",
+        ]
         r1 = st.columns(3); r2 = st.columns(3)
-        for col, (letter, sub, val, note, color, badge_txt) in zip(list(r1)+list(r2), circle_data):
+        for idx, (col, (letter, sub, val, note, color, badge_txt)) in enumerate(zip(list(r1)+list(r2), circle_data)):
             badge_color = {"gap":"#7f1d1d","strong":"#14532d","proxied":"#1e3a5f","new insight":"#4a1d96"}.get(badge_txt,"#334155")
             badge_fg    = {"gap":"#fca5a5","strong":"#4ade80","proxied":"#60a5fa","new insight":"#c084fc"}.get(badge_txt,"#94a3b8")
             col.markdown(f"""
@@ -1931,6 +1972,17 @@ def main():
   <span style="background:{badge_color};color:{badge_fg};border-radius:20px;padding:2px 10px;font-size:0.65rem;font-weight:700;">{badge_txt}</span>
 </div>
 """, unsafe_allow_html=True)
+            with col:
+                src_d = circle_src_data[idx]
+                if src_d:
+                    detail_popup(
+                        sub.replace("\n"," "),
+                        f"CIRCLE dimension: {sub.replace(chr(10),' ')}. {note}",
+                        circle_formulas[idx],
+                        f"Value: {val}  —  {note}  |  Badge: {badge_txt}",
+                        src_d,
+                        popup_key=f"circle_{idx}"
+                    )
 
         # Sub-tabs
         ct1, ct2, ct3, ct4 = st.tabs(["C — Engagement", "C — Behavior change", "E — Ecosystem barriers", "L — Patient linkage"])
@@ -2014,9 +2066,9 @@ def main():
   <div style="font-size:0.75rem;color:#64748b;margin-bottom:14px;">Did participants find the program engaging, relevant, and free of bias? Measures immediate response to the learning experience.</div>
 """, unsafe_allow_html=True)
         dk1,dk2,dk3,dk4 = st.columns(4)
-        render_eval_donut(dk1, an["recommendPct"],  "Would\nrecommend",       f"(n={an['withEval']:,})", "#f59e0b")
-        render_eval_donut(dk2, an["biasFreeYes"],   "Bias-free\ncontent",      f"(n={an['withEval']:,})", "#f59e0b")
-        render_eval_donut(dk3, an["avgContentNew"], "Content was\nnew",        f"(n={an['withEval']:,})", "#f59e0b")
+        render_eval_donut(dk1, an["recommendPct"],  "Would\nrecommend",       f"(n={an['withEval']:,})", "#f59e0b", an.get("_srcRecommend"), "kirk_rec")
+        render_eval_donut(dk2, an["biasFreeYes"],   "Bias-free\ncontent",      f"(n={an['withEval']:,})", "#f59e0b", an.get("_srcBias"),      "kirk_bias")
+        render_eval_donut(dk3, an["avgContentNew"], "Content was\nnew",        f"(n={an['withEval']:,})", "#f59e0b", an.get("_srcContentNew"),"kirk_content")
         render_eval_donut(dk4, an["preToPostRate"], "Eval completion\nrate",   f"(n={an['total']:,})",    "#f59e0b")
         st.markdown(f"""
   <div style="background:#1c1200;border:1px solid #78350f;border-radius:6px;padding:8px 14px;margin-top:12px;">
@@ -2037,7 +2089,7 @@ def main():
   <div style="font-size:0.7rem;color:#475569;margin-bottom:8px;">Knowledge acquisition — % correct responses pre vs post</div>
 """, unsafe_allow_html=True)
         for kr in an["knowledgeResults"][:4]:
-            render_knowledge_row(kr)
+            render_knowledge_row(kr, tab_id="kirk")
         st.markdown("</div>", unsafe_allow_html=True)
 
         # Level 3 — Behavior
